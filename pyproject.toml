@@ -1,0 +1,24 @@
+[project]
+name = "local-intelligence"
+version = "0.1.0"
+description = "Abliteration + LoRA fine-tuning harness for open models on Apple Silicon (8/16/32GB+)"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "mlx>=0.29",
+    "mlx-lm>=0.25",
+    "huggingface_hub>=0.34",
+    "safetensors>=0.5",
+    "numpy>=1.26",
+    "datasets>=3.0",
+    "tomli-w>=1.0",
+]
+
+[project.scripts]
+li = "li.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.7,<1.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "li"

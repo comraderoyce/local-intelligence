@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+dist/
+
+# machine-local artifacts
+li.toml
+models/
+runs/
+evals/
+adapters/
+datasets/
+*.safetensors
