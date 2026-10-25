@@ -22,6 +22,7 @@ class ModelSpec:
     train_ram_gb: int    # floor for local LoRA fine-tuning
     moe: bool = False
     note: str = ""
+    draft_repo: str = ""  # same-tokenizer small model for speculative decoding
 
 
 MODELS: dict[str, ModelSpec] = {
@@ -51,6 +52,12 @@ MODELS: dict[str, ModelSpec] = {
         32.8, 3, 64, 16, 64,
         note="abliterate+inference on 16GB, training needs >=64GB",
     ),
+    "qwen3.8-27b": ModelSpec(
+        "qwen3.8-27b", "Qwen/Qwen3.8-27B", "lukaskremla/Qwen3.8-27B-3bit-MLX-TextOnly",
+        27.0, 3, 64, 16, 64,
+        note="hybrid DeltaNet, 11GB; on 16GB eval/chat stream layers from disk",
+        draft_repo="mlx-community/Qwen3.5-0.8B-4bit",
+    ),
 }
 
 
@@ -58,6 +65,30 @@ def machine_ram_gb() -> int:
     page = os.sysconf("SC_PAGE_SIZE")
     nphys = os.sysconf("SC_PHYS_PAGES")
     return round(page * nphys / 2**30)
+
+
+# Fraction of RAM model weights may take for full-model inference (eval/chat).
+# Past this, GPU buffers starve WindowServer: a 3-bit 27B (11GB) on a 16GB Mac
+# hit a userspace-watchdog kernel panic. measure/abliterate stream per layer
+# and are exempt.
+INFERENCE_RAM_FRACTION = 0.6
+
+
+def weights_gb(model_dir: str) -> float:
+    from pathlib import Path
+    return sum(f.stat().st_size for f in Path(model_dir).glob("*.safetensors")) / 2**30
+
+
+def check_inference_fits(model_dir: str, force: bool = False) -> None:
+    ram, size = machine_ram_gb(), weights_gb(model_dir)
+    if size <= ram * INFERENCE_RAM_FRACTION:
+        return
+    msg = (f"{model_dir}: {size:.1f}GB of weights on a {ram}GB machine exceeds the "
+           f"{INFERENCE_RAM_FRACTION:.0%} safe limit for full-model inference "
+           "(risk: WindowServer watchdog panic)")
+    if not force:
+        raise SystemExit(msg + " — run on a bigger machine, or --force with all other apps closed")
+    print("WARNING: " + msg)
 
 
 def resolve_spec(name_or_hf_id: str) -> ModelSpec:

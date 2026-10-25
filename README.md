@@ -60,6 +60,7 @@ Qwen3-0.6B answers cleanly when ablated at layer 16/28, produces mojibake at lay
 | Qwen3-8B | 4-bit | 8GB ✓ (tight) | 16GB ✓ |
 | Qwen3-14B | 4-bit | 16GB ✓ | 32GB ✓ |
 | Qwen3-30B-A3B (MoE) | 3-bit | 16GB ✓ | 64GB+ |
+| Qwen3.8-27B (hybrid) | 3-bit | 16GB ✓ (eval/chat need 24GB) | 64GB+ |
 | Qwen3-32B | 3-bit | 16GB ✓ | 64GB+ |
 
 `li init` checks your RAM and refuses (or with `--force`, warns) tiers that can't run.
@@ -71,7 +72,16 @@ which needs disk but not RAM (streamed conversion).
 
 ## Notes
 
-- Qwen has no 27B model; the ~30B class here is Qwen3-30B-A3B / Qwen3-32B.
+- Qwen3.8-27B is a hybrid model (Gated DeltaNet `linear_attn` layers plus a
+  full-attention layer every 4th) in a multimodal-wrapped checkpoint
+  (`language_model.model.layers...`). Abliteration edits `linear_attn.out_proj`,
+  `self_attn.o_proj` and `mlp.down_proj`. There is no mlx-community 3-bit build, so the
+  registry pulls a text-only community quant (`lukaskremla/Qwen3.8-27B-3bit-MLX-TextOnly`).
+- Full-model inference (`eval`, `chat`) is refused when weights exceed 60% of RAM
+  (`--force` overrides). Loading the 11GB 3-bit 27B on a 16GB Mac starved WindowServer
+  into a watchdog kernel panic, worse with `iogpu.wired_limit_mb` raised — don't raise it.
+  `measure` loads the model lazily and runs one layer at a time over all prompts, and
+  `abliterate` rewrites shards in ~1GB parts, so both stay at a few GB on any size model.
 - Thinking mode (Qwen3) is disabled for all harness generation for speed and
   consistency; the final fused model still supports it in normal use.
 - Small models (≤4B) lose more general capability from abliteration than 8B+. Always

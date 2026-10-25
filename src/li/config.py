@@ -28,6 +28,11 @@ class Config:
     layer: int | None = None     # chosen refusal-direction layer
     layer_score: float | None = None
     alpha: float = 1.0           # direction removal strength, 1.0 = full
+    pos: int | None = None       # template-suffix position (negative offset)
+    from_layer: int = 0          # edit layers >= this; 0 = all (canonical)
+    n_dirs: int = 1              # refusal directions removed (rank of the edit)
+    embed_ablate: bool = True    # also orthogonalize the token embedding
+    project_harmless: bool = False
     # prompt / generation budgets
     n_harmful: int = 128
     n_harmless: int = 128
@@ -35,6 +40,11 @@ class Config:
     n_xstest_eval: int = 100
     max_seq: int = 384
     max_new_tokens: int = 256
+    # streamed inference (models larger than safe resident memory)
+    stream_budget_gb: float = 0.0   # 0 = auto from available memory
+    eval_batch: int = 8             # sequences per streamed forward pass
+    draft_dir: str = ""             # speculative-decoding draft model
+    num_draft: int = 3
     seed: int = 0
     # training
     train_data: str = ""

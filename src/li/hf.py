@@ -8,6 +8,18 @@ from .config import Config
 from .registry import resolve_spec
 
 
+def download_draft(cfg: Config) -> None:
+    """Pull the registry's speculative-decoding draft model, if it has one."""
+    spec = resolve_spec(cfg.name) if "/" not in cfg.name else None
+    if not spec or not spec.draft_repo or cfg.draft_dir:
+        return
+    from huggingface_hub import snapshot_download
+    cfg.draft_dir = f"models/{spec.draft_repo.split('/')[-1].lower()}"
+    if not (Path(cfg.draft_dir) / "config.json").exists():
+        print(f"pulling draft model {spec.draft_repo} -> {cfg.draft_dir}")
+        snapshot_download(repo_id=spec.draft_repo, local_dir=cfg.draft_dir)
+
+
 def download_model(cfg: Config) -> Path:
     target = Path(cfg.model_dir)
     if (target / "config.json").exists():

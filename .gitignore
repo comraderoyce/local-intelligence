@@ -5,10 +5,10 @@ __pycache__/
 dist/
 
 # machine-local artifacts
-li.toml
-models/
-runs/
-evals/
-adapters/
-datasets/
+/li.toml
+/models/
+/runs/
+/evals/
+/adapters/
+/datasets/
 *.safetensors
