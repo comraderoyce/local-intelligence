@@ -55,10 +55,21 @@ class Config:
     lora_batch_size: int = 1
     lora_layers: int = 16
     fused_dir: str = ""
+    export_dir: str = ""
 
     @property
     def run_dir(self) -> str:
         return f"runs/{self.name}-{self.quant_bits}bit"
+
+    @property
+    def export_path(self) -> str:
+        """Standalone abliterated model (`li export`)."""
+        return self.export_dir or f"{self.run_dir}/export"
+
+    @property
+    def source_dir(self) -> str:
+        """Original unquantized weights, downloaded once for export."""
+        return f"models/{self.name}-bf16"
 
     @property
     def eval_dir(self) -> str:

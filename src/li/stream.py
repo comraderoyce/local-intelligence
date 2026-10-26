@@ -332,23 +332,33 @@ class StreamEngine:
         self._prefetcher.submit(j, self._spans[j])
 
     def _patch_wired_limit(self) -> None:
-        # mlx_lm's generate wires up to the device's recommended working set
-        # (~10.7GB on 16GB) for the duration of generation; wired buffers can't
-        # be paged, which is how a 16GB Mac starves. Wire only what is resident.
-        import mlx_lm.generate as gen
-        import mlx_lm.utils as utils
-        limit = int((self.resident_gb + 1.0) * 2**30)
-
-        def wired() -> int:
-            return mx.set_wired_limit(limit)
-        gen.maybe_set_recommended_wired_limit = wired
-        utils.maybe_set_recommended_wired_limit = wired
+        cap_wired_limit(self.resident_gb + 1.0)
 
     def describe(self) -> str:
         n = len(self.layers)
         return (f"{n - len(self.streamed)}/{n} layers resident "
                 f"({self.resident_gb:.1f}GB), {len(self.streamed)} streamed "
                 f"({self.streamed_gb:.1f}GB read per forward pass)")
+
+
+def cap_wired_limit(gb: float) -> None:
+    """mlx_lm wires up to the device's recommended working set (~10.7GB on
+    16GB) while generating; wired buffers can't be paged, which is how a 16GB
+    Mac starves WindowServer. Wire at most `gb` instead.
+
+    Patched through sys.modules: `import mlx_lm.generate` binds the
+    `generate` function that mlx_lm/__init__.py re-exports, not the module,
+    so patching that name silently does nothing."""
+    import importlib
+    import sys
+    limit = int(gb * 2**30)
+
+    def wired() -> int:
+        return mx.set_wired_limit(limit)
+    for name in ("mlx_lm.utils", "mlx_lm.generate", "mlx_lm.server"):
+        mod = sys.modules.get(name) or importlib.import_module(name)
+        if hasattr(mod, "maybe_set_recommended_wired_limit"):
+            mod.maybe_set_recommended_wired_limit = wired
 
 
 def resolve_model_dir(model_dir: str) -> tuple[str, str | None]:

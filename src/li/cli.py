@@ -191,13 +191,19 @@ def cmd_eval(args: argparse.Namespace) -> None:
           + ("" if judge else " (no judge: phrase match only)"))
 
 
-def _require_weights_dir(path: str, what: str) -> None:
+def _abliterated_weights(cfg: Config, what: str) -> str:
+    """A weights dir holding the abliterated model. On quantized bases
+    abliteration is an adapter, so training and fusing use its export."""
     from .stream import resolve_model_dir
-    if resolve_model_dir(path)[1] is not None:
-        raise SystemExit(
-            f"{path} is a rank-1 abliteration adapter over a quantized base, not a "
-            f"weights dir; {what} on it isn't supported (fusing into the quantized "
-            "weights would undo it — see README)")
+    if not Path(cfg.abliterated_dir).exists():
+        raise SystemExit(f"no abliterated model at {cfg.abliterated_dir} — run "
+                         "`li abliterate` or `li optimize`")
+    if resolve_model_dir(cfg.abliterated_dir)[1] is None:
+        return cfg.abliterated_dir
+    if not Path(cfg.export_path).exists():
+        raise SystemExit(f"{cfg.abliterated_dir} is an adapter over a quantized base; "
+                         f"{what} needs standalone weights — run `li export` first")
+    return cfg.export_path
 
 
 def cmd_train(args: argparse.Namespace) -> None:
@@ -211,10 +217,7 @@ def cmd_train(args: argparse.Namespace) -> None:
 
     base = cfg.model_dir
     if args.on == "abliterated":
-        if not Path(cfg.abliterated_dir).exists():
-            raise SystemExit(f"no abliterated model at {cfg.abliterated_dir} — run `li abliterate`")
-        base = cfg.abliterated_dir
-        _require_weights_dir(base, "LoRA training")
+        base = _abliterated_weights(cfg, "LoRA training")
     ram = machine_ram_gb()
     if ram < 16:
         print(f"note: {ram}GB — keep iters/batch small; watch for memory pressure")
@@ -236,12 +239,63 @@ def cmd_fuse(args: argparse.Namespace) -> None:
     adapter = args.adapter or cfg.adapter_dir
     if not Path(adapter).exists():
         raise SystemExit(f"no adapter at {adapter} — run `li train` first")
-    base = cfg.abliterated_dir if Path(cfg.abliterated_dir).exists() else cfg.model_dir
-    _require_weights_dir(base, "fusing")
+    # fuse onto the model the adapter was trained on
+    trained_on = json.loads((Path(adapter) / "adapter_config.json").read_text()).get("model")
+    base = trained_on or _abliterated_weights(cfg, "fusing")
     out = args.out or cfg.fused_dir
     from .train import fuse_adapter
     fuse_adapter(base, adapter, out)
     print(f"fused model: {out} — serve with `li chat --dir {out}` or mlx_lm.server")
+
+
+def cmd_export(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    from .stream import resolve_model_dir
+    adapter = args.adapter or cfg.abliterated_dir
+    if resolve_model_dir(adapter)[1] is None:
+        raise SystemExit(f"{adapter} is not an adapter dir; it already holds weights")
+    out = args.out or cfg.export_path
+    from .export import export_model, refusal_opener_prob
+    res = export_model(adapter, cfg.repo, cfg.source_dir, out,
+                       args.bits or cfg.quant_bits, cfg.quant_group, args.keep_edited)
+    print(f"\nexported {res['edited_modules']} edited modules -> {out} "
+          f"({res['size_gb']:.1f}GB)")
+    if not args.no_verify:
+        from .data import load_advbench
+        prompts = load_advbench(16, cfg.seed, split="select")
+        print("verifying: P(first token opens a refusal) on 16 held-out harmful prompts")
+        for label, path in (("base", cfg.model_dir), ("adapter", adapter), ("export", out)):
+            print(f"  {label:8s} {refusal_opener_prob(path, prompts):.3f}", flush=True)
+        print("  export should track adapter, both well below base")
+    if not args.out:
+        cfg.export_dir = out
+        save_config(cfg)
+    print(f"next: `li serve` (OpenAI-compatible server), `li train --on abliterated`")
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    from .registry import check_inference_fits, weights_gb
+    from .stream import resolve_model_dir
+    if args.dir:
+        target = args.dir
+    elif args.base:
+        target = cfg.model_dir
+    elif Path(cfg.export_path).exists():
+        target = cfg.export_path
+    elif Path(cfg.abliterated_dir).exists():
+        target = cfg.abliterated_dir
+    else:
+        target = cfg.model_dir
+    model_dir, adapter = resolve_model_dir(target)
+    # mlx_lm.server loads the whole model; streaming is `li chat` only
+    check_inference_fits(model_dir, force=args.force)
+    abliterated = target != cfg.model_dir
+    name = args.name or f"{cfg.name}{'-abliterated' if abliterated else ''}"
+    from .serve import run_server
+    run_server(model_dir, adapter, name, args.host, args.port, args.max_tokens,
+               args.think, weights_gb(model_dir),
+               args.mlx_args[1:] if args.mlx_args[:1] == ["--"] else args.mlx_args)
 
 
 def _parse_dirs(spec: str) -> dict[str, str]:
@@ -383,6 +437,32 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--adapter")
     sp.add_argument("--out")
     sp.set_defaults(fn=cmd_fuse)
+
+    sp = sub.add_parser("export", help="abliteration adapter -> standalone quantized model")
+    sp.add_argument("--adapter", help="abliteration adapter dir (default: abliterated_dir)")
+    sp.add_argument("--out", help="output dir (default: runs/<model>/export)")
+    sp.add_argument("--bits", type=int, help="quantization bits (default: the model's; 16 = bf16)")
+    sp.add_argument("--keep-edited", action="store_true",
+                    help="keep the intermediate edited bf16 copy")
+    sp.add_argument("--no-verify", action="store_true",
+                    help="skip the base/adapter/export refusal comparison")
+    sp.set_defaults(fn=cmd_export)
+
+    sp = sub.add_parser("serve", help="OpenAI-compatible server (for agents, chat UIs)")
+    sp.add_argument("--dir", help="model or adapter dir (default: export, else adapter, else base)")
+    sp.add_argument("--base", action="store_true", help="serve the unmodified base model")
+    sp.add_argument("--name", help="model id clients see (default: <model>-abliterated)")
+    sp.add_argument("--host", default="127.0.0.1")
+    sp.add_argument("--port", type=int, default=8080)
+    sp.add_argument("--max-tokens", type=int, default=4096,
+                    help="default response cap when a request sets none")
+    sp.add_argument("--think", action=argparse.BooleanOptionalAction, default=True,
+                    help="Qwen3 thinking mode (default on; --no-think is faster)")
+    sp.add_argument("--force", action="store_true",
+                    help="serve even if the weights exceed the safe RAM fraction")
+    sp.add_argument("mlx_args", nargs=argparse.REMAINDER,
+                    help="after `--`: extra mlx_lm.server flags, e.g. -- --temp 0.7")
+    sp.set_defaults(fn=cmd_serve)
 
     sp = sub.add_parser("chat", help="interactive chat against a model dir")
     sp.add_argument("--dir")
