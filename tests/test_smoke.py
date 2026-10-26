@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -69,12 +70,16 @@ class SmokeTest(unittest.TestCase):
             self.assertLess(row["perplexity"], 200)       # model still coherent
 
         # Qwen3-0.6B ties its embedding and output head: export must untie them
-        out = li(cwd, "export")
         export = run / "export"
+        shutil.rmtree(export, ignore_errors=True)   # reused LI_SMOKE_WORKDIR
+        out = li(cwd, "export")
         cfg = json.loads((export / "config.json").read_text())
         self.assertFalse(cfg.get("tie_word_embeddings", True))
-        probs = {line.split()[0]: float(line.split()[1]) for line in out.splitlines()
-                 if line.strip().split()[:1] in (["base"], ["adapter"], ["export"])}
+        probs = {}
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] in ("base", "adapter", "export"):
+                probs[parts[0]] = float(parts[1])
         self.assertLess(abs(probs["export"] - probs["adapter"]),
                         0.5 * abs(probs["base"] - probs["adapter"]) + 0.02)
 
