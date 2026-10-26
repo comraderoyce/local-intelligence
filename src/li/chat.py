@@ -11,7 +11,7 @@ import time
 
 import mlx.core as mx
 
-from .generate import chat_inputs
+from .generate import chat_ids, chat_inputs
 from .stream import load_for_inference, make_rewindable_cache, wrap_for_rewind
 
 
@@ -40,16 +40,18 @@ def _generate(model, tokenizer, ids, cache, draft, num_draft, max_tokens, echo):
     kw = {"draft_model": draft, "num_draft_tokens": num_draft} if draft else {}
     t0, t1 = time.time(), None
     n = accepted = 0
+    text = []
     for r in stream_generate(model, tokenizer, prompt=ids, max_tokens=max_tokens,
                              prompt_cache=cache, **kw):
         if t1 is None:
             t1 = time.time()
         n += 1
         accepted += bool(getattr(r, "from_draft", False))
+        text.append(r.text)
         if echo:
             print(r.text, end="", flush=True)
     t2 = time.time()
-    return {"prefill_s": (t1 or t2) - t0, "tokens": n,
+    return {"prefill_s": (t1 or t2) - t0, "tokens": n, "text": "".join(text),
             "tok_s": (n - 1) / (t2 - t1) if n > 1 else 0.0,
             "accepted": accepted / n if n else 0.0}
 
@@ -60,7 +62,11 @@ def run_chat(model_dir: str, draft_dir: str, budget_gb: float | None,
     print(f"{model_dir}: " + (engine.describe() if engine else "fully resident")
           + (f", speculative with {draft_dir}" if draft else ""))
     print("type a message; 'q' quits, '/reset' clears history\n")
-    cache = _new_cache(model, draft, num_draft)
+    # The conversation is re-templated every turn rather than appended to a
+    # running cache: generation feeds the end-of-turn token into the cache but
+    # not the separator after it, a reply cut at max_tokens has no end-of-turn
+    # at all, and templates like Qwen3's rewrite earlier assistant turns.
+    messages: list[dict] = []
     while True:
         try:
             user = input(">> ").strip()
@@ -69,12 +75,15 @@ def run_chat(model_dir: str, draft_dir: str, budget_gb: float | None,
         if user == "q":
             break
         if user == "/reset":
-            cache = _new_cache(model, draft, num_draft)
+            messages.clear()
             continue
         if not user:
             continue
-        stats = _generate(model, tokenizer, chat_inputs(tokenizer, user), cache,
+        messages.append({"role": "user", "content": user})
+        stats = _generate(model, tokenizer, chat_ids(tokenizer, messages),
+                          _new_cache(model, draft, num_draft),
                           draft, num_draft, max_tokens, echo=True)
+        messages.append({"role": "assistant", "content": stats["text"]})
         extra = f", {stats['accepted']:.0%} drafted" if draft else ""
         print(f"\n[{stats['tok_s']:.2f} tok/s, prefill {stats['prefill_s']:.1f}s{extra}]\n")
 

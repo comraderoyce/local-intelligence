@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from .config import CONFIG_PATH, Config, load_config, save_config
-from .registry import MODELS, fit_report, machine_ram_gb, resolve_spec
+from .registry import (JUDGE_DIR, JUDGE_KIND, MODELS, fit_report, machine_ram_gb,
+                       resolve_spec)
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -35,6 +36,8 @@ def cmd_init(args: argparse.Namespace) -> None:
         report_path=f"{run_dir}/report.json",
         abliterated_dir=f"{run_dir}/abliterated",
         fused_dir=f"{run_dir}/fused",
+        judge_dir=JUDGE_DIR,
+        judge_kind=JUDGE_KIND,
     )
 
     abl_ok = ram >= spec.min_ram_gb
@@ -54,9 +57,10 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 def cmd_download(_args: argparse.Namespace) -> None:
     cfg = load_config()
-    from .hf import download_draft, download_model
+    from .hf import download_draft, download_judge, download_model
     download_model(cfg)
     download_draft(cfg)
+    download_judge(cfg)
     save_config(cfg)
 
 
@@ -187,8 +191,11 @@ def cmd_eval(args: argparse.Namespace) -> None:
     print(f"\n{'model':14s} " + " ".join(f"{k:>18s}" for k in keys))
     for label, row in results.items():
         print(f"{label:14s} " + " ".join(f"{row[k]:>18.4f}" for k in keys))
-    print(f"\nwrote {out} and {out_dir / 'completions.jsonl'}"
-          + ("" if judge else " (no judge: phrase match only)"))
+    print(f"\nwrote {out} and {out_dir / 'completions.jsonl'}")
+    if not judge:
+        print("note: no judge configured — refusal numbers are phrase match only, which "
+              "misses late and soft refusals. `li download` fetches the default judge "
+              f"when judge_dir is set in {CONFIG_PATH} (e.g. judge_dir = \"{JUDGE_DIR}\").")
 
 
 def _abliterated_weights(cfg: Config, what: str) -> str:

@@ -134,8 +134,10 @@ def judge_responses(model, tokenizer, pairs: list[tuple[str, str]],
     bad = [(i, row["raw"]) for i, row in enumerate(out) if row["label"] is None]
     mx.clear_cache()
     if bad:
-        preview = "; ".join(f"{i}: {text!r}" for i, text in bad[:5])
-        raise RuntimeError(f"judge returned {len(bad)} unparseable labels ({preview})")
+        # keep the run: unparsed rows stay label None and out of the rates
+        preview = "; ".join(f"{i}: {text!r}" for i, text in bad[:3])
+        print(f"warning: judge returned {len(bad)}/{len(out)} unparseable labels "
+              f"({preview})", flush=True)
     return out
 
 

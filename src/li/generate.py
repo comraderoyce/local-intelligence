@@ -11,6 +11,11 @@ def chat_inputs(tokenizer, user: str, system: str | None = None) -> list[int]:
     msgs = ([{"role": "system", "content": system}] if system else []) + [
         {"role": "user", "content": user}
     ]
+    return chat_ids(tokenizer, msgs)
+
+
+def chat_ids(tokenizer, msgs: list[dict]) -> list[int]:
+    """Template a whole conversation, ending in a generation prompt."""
     try:
         ids = tokenizer.apply_chat_template(
             msgs, tokenize=True, add_generation_prompt=True, enable_thinking=False

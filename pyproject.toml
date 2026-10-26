@@ -1,11 +1,24 @@
 [project]
 name = "local-intelligence"
-version = "0.1.0"
+version = "0.1.0a1"
 description = "Abliteration + LoRA fine-tuning harness for open models on Apple Silicon (8/16/32GB+)"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.14"
+keywords = ["mlx", "apple-silicon", "abliteration", "lora", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "mlx>=0.29",
-    "mlx-lm>=0.25",
+    "mlx-lm>=0.32,<0.33",  # li serve patches mlx_lm.server internals
     "huggingface_hub>=0.34",
     "safetensors>=0.5",
     "numpy>=1.26",
@@ -13,6 +26,11 @@ dependencies = [
     "tomli-w>=1.0",
     "optuna>=4.0",
 ]
+
+[project.urls]
+# TODO(release): replace OWNER with the GitHub account or org
+Repository = "https://github.com/OWNER/local-intelligence"
+Issues = "https://github.com/OWNER/local-intelligence/issues"
 
 [project.scripts]
 li = "li.cli:main"
@@ -23,3 +41,6 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "li"
+
+[dependency-groups]
+dev = ["pytest>=8"]

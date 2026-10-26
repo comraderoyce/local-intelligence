@@ -67,6 +67,13 @@ def machine_ram_gb() -> int:
     return round(page * nphys / 2**30)
 
 
+# Default refusal judge for `li eval` and optimizer reranking: a purpose-trained
+# safety classifier, so the model under test never grades itself.
+JUDGE_REPO = "mlx-community/Qwen3Guard-Gen-0.6B-MLX"
+JUDGE_DIR = "models/qwen3guard-0.6b"
+JUDGE_KIND = "qwen3guard"
+
+
 # Fraction of RAM model weights may take for full-model inference (eval/chat).
 # Past this, GPU buffers starve WindowServer: a 3-bit 27B (11GB) on a 16GB Mac
 # hit a userspace-watchdog kernel panic. measure/abliterate stream per layer

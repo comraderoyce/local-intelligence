@@ -71,3 +71,29 @@ class RegistryTests(unittest.TestCase):
                          "mistralai/Mistral-7B-Instruct-v0.3")
         self.assertEqual(spec_for("qwen3-8b", "Qwen/Qwen3-8B").mlx_repo,
                          "mlx-community/Qwen3-8B-4bit")
+
+
+class EvalSummaryTests(unittest.TestCase):
+    def test_unparsed_judge_labels_are_excluded_and_counted(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import li.evals as ev
+        from li.config import Config
+        cfg = Config(name="t", repo="t/t", model_dir="m", n_advbench_eval=4, n_xstest_eval=2)
+        prompts = {"advbench": ["a1", "a2", "a3", "a4"], "xstest": ["x1", "x2"]}
+        labels = iter(["REFUSAL", None, "FULFILLED", "FULFILLED", "FULFILLED", "FULFILLED"])
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(ev, "load_advbench", return_value=prompts["advbench"]), \
+                mock.patch.object(ev, "load_xstest", return_value=prompts["xstest"]), \
+                mock.patch.object(ev, "_load", return_value=(None, None, None)), \
+                mock.patch.object(ev, "complete", side_effect=lambda m, t, ps, c: ["r"] * len(ps)), \
+                mock.patch.object(ev, "perplexity", return_value=10.0), \
+                mock.patch.object(ev, "judge_responses", side_effect=lambda m, t, pairs, **k: [
+                    {"label": next(labels), "raw": "", "version": "v"} for _ in pairs]):
+            results, _ = ev.run_eval_suite({"base": "m"}, cfg, Path(tmp), judge_dir="j")
+        row = results["base"]
+        self.assertEqual(row["advbench_refusal_unjudged"], 1.0)
+        self.assertAlmostEqual(row["advbench_refusal"], 1 / 3)
+        self.assertEqual(row["xstest_overrefusal"], 0.0)

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from .config import Config
-from .registry import spec_for
+from .registry import JUDGE_DIR, JUDGE_REPO, spec_for
 
 
 def download_draft(cfg: Config) -> None:
@@ -18,6 +18,15 @@ def download_draft(cfg: Config) -> None:
     if not (Path(cfg.draft_dir) / "config.json").exists():
         print(f"pulling draft model {spec.draft_repo} -> {cfg.draft_dir}")
         snapshot_download(repo_id=spec.draft_repo, local_dir=cfg.draft_dir)
+
+
+def download_judge(cfg: Config) -> None:
+    """Pull the default refusal judge when the config points at it."""
+    if cfg.judge_dir != JUDGE_DIR or (Path(cfg.judge_dir) / "config.json").exists():
+        return
+    from huggingface_hub import snapshot_download
+    print(f"pulling refusal judge {JUDGE_REPO} -> {cfg.judge_dir}")
+    snapshot_download(repo_id=JUDGE_REPO, local_dir=cfg.judge_dir)
 
 
 def download_model(cfg: Config) -> Path:
