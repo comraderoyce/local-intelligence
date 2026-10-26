@@ -41,12 +41,10 @@ def download_source(repo: str, local_dir: str) -> Path:
     from huggingface_hub import snapshot_download
     print(f"pulling source weights {repo} -> {target} (bf16; large, one-time)")
     snapshot_download(repo_id=repo, local_dir=target, allow_patterns=SOURCE_PATTERNS)
-    index = target / "model.safetensors.index.json"
-    if index.exists():
-        shards = set(json.loads(index.read_text())["weight_map"].values())
-        missing = sorted(s for s in shards if not (target / s).exists())
-        if missing:
-            raise SystemExit(f"source download incomplete: missing {', '.join(missing)}")
+    from .hf import missing_weights
+    missing = missing_weights(target)
+    if missing:
+        raise SystemExit(f"source download incomplete: missing {', '.join(missing)}")
     return target
 
 

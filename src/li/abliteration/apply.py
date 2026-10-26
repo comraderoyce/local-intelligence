@@ -239,11 +239,11 @@ def _write_adapter(model_dir: str, dirs: mx.array, meta: dict, alpha_of: AlphaFn
             mx.eval(adapters[param + ".lora_a"], adapters[param + ".lora_b"])
         del tensors
         mx.clear_cache()
-    if dst.exists():
-        for f in dst.iterdir():  # replace any earlier (weight-copy) output
-            if f.is_file():
-                f.unlink()
-    dst.mkdir(parents=True, exist_ok=True)
+    # Write beside dst and swap in whole: the previous adapter (or weight copy)
+    # survives an interrupted write, e.g. the memory guard exiting.
+    final, dst = dst, dst.with_name(dst.name + ".partial")
+    shutil.rmtree(dst, ignore_errors=True)
+    dst.mkdir(parents=True)
     mx.save_safetensors(str(dst / "adapters.safetensors"), adapters)
     (dst / "adapter_config.json").write_text(json.dumps({
         "fine_tune_type": "lora",
@@ -255,6 +255,12 @@ def _write_adapter(model_dir: str, dirs: mx.array, meta: dict, alpha_of: AlphaFn
         "base_model": model_dir,
         "abliteration": meta,
     }, indent=2) + "\n")
+    old = final.with_name(final.name + ".old")
+    shutil.rmtree(old, ignore_errors=True)
+    if final.exists():
+        final.rename(old)
+    dst.rename(final)
+    shutil.rmtree(old, ignore_errors=True)
     return {"modified_tensors": len(adapters) // 2, **meta, "out_dir": out_dir,
             "quantized": True, "adapter": True}
 

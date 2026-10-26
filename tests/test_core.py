@@ -171,3 +171,46 @@ class GuardrailTests(unittest.TestCase):
                 cfg = load_config(path)
         self.assertEqual(cfg.name, "t")
         self.assertIn("old_key", out.getvalue())
+
+
+class JudgeRateTests(unittest.TestCase):
+    def test_unparsed_labels_are_excluded_not_refusals(self):
+        from li.evals.refusal import label_rates
+        rates = label_rates(["FULFILLED"] * 99 + [None], "t")
+        self.assertEqual(rates["refusal"], 0.0)
+        self.assertEqual(rates["unjudged"], 1.0)
+        with self.assertRaises(RuntimeError):
+            label_rates(["FULFILLED"] * 15 + [None], "t")   # 1/16 > 2%
+
+
+class StudySetupTests(unittest.TestCase):
+    def test_resume_refuses_a_changed_setup(self):
+        import optuna
+
+        from li.abliteration.optimize import check_study_setup
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = optuna.create_study(study_name="s")
+        setup = {"model": "a", "n_prompts": 16}
+        check_study_setup(study, setup)
+        study.optimize(lambda t: t.suggest_float("x", 0, 1), n_trials=1)
+        check_study_setup(study, dict(setup))
+        with self.assertRaises(SystemExit):
+            check_study_setup(study, {**setup, "n_prompts": 32})
+
+
+class DownloadTests(unittest.TestCase):
+    def test_missing_weights_reads_the_index(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from li.hf import missing_weights
+        with tempfile.TemporaryDirectory() as d:
+            t = Path(d)
+            self.assertEqual(missing_weights(t), ["config.json"])
+            (t / "config.json").write_text("{}")
+            self.assertEqual(missing_weights(t), ["*.safetensors"])
+            (t / "model.safetensors.index.json").write_text(json.dumps(
+                {"weight_map": {"a": "model-1.safetensors", "b": "model-2.safetensors"}}))
+            (t / "model-1.safetensors").write_bytes(b"")
+            self.assertEqual(missing_weights(t), ["model-2.safetensors"])

@@ -37,7 +37,7 @@ import numpy as np
 from safetensors.numpy import safe_open as np_safe_open
 
 from ..config import Config
-from ..data import load_advbench, load_harmless
+from ..data import load_advbench, load_harmless, load_wikitext, revisions
 from ..generate import chat_inputs
 
 COMPONENTS = {
@@ -160,6 +160,26 @@ def schedule(params: dict, n_layers: int) -> tuple[dict[str, list[float]], float
     return alphas, params["embed"]
 
 
+# Bump when the search space or score formula changes: old trials then no
+# longer measure the same thing.
+OBJECTIVE_VERSION = 1
+
+
+def check_study_setup(study, setup: dict) -> None:
+    """Record `setup` on a new study; refuse to resume one run under another."""
+    saved = study.user_attrs.get("setup")
+    if not study.trials:
+        study.set_user_attr("setup", setup)
+    elif saved is None:
+        print(f"  warning: study '{study.study_name}' predates setup checks; "
+              "resuming unverified", flush=True)
+    elif saved != setup:
+        changed = ", ".join(k for k in setup if saved.get(k) != setup[k])
+        raise SystemExit(f"study '{study.study_name}' was run with a different {changed}; "
+                         "its trials aren't comparable. Rerun with --study <new name> "
+                         "for a fresh search")
+
+
 def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_report: str,
              n_trials: int = 40, n_prompts: int = 16, max_tokens: int = 64,
              batch: int = 16, kl_soft: float = 0.3, kl_weight: float = 0.5,
@@ -171,7 +191,7 @@ def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_rep
     import optuna
     from mlx_lm import batch_generate
 
-    from ..evals.refusal import detect_withholding, judge_responses
+    from ..evals.refusal import detect_withholding, judge_responses, label_rates
     from ..stream import load_streamed
     from .apply import write_abliteration
     from .select import _first_token_logprobs
@@ -191,9 +211,7 @@ def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_rep
     harmful_texts = load_advbench(n_prompts, cfg.seed, split="optimize")
     harmful = [chat_inputs(tokenizer, p) for p in harmful_texts]
     harmless = load_harmless(n_prompts, cfg.seed, split="optimize")
-    from datasets import load_dataset
-    text = "\n\n".join(t for t in load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1",
-                                              split="test")["text"] if t.strip())
+    text = "\n\n".join(load_wikitext())
     ppl_ids = mx.array([tokenizer.encode(text[:20000])[:PPL_TOKENS]])
 
     def short_ppl() -> float:
@@ -264,6 +282,16 @@ def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_rep
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(direction="minimize", study_name=study_name,
                                 storage=storage, load_if_exists=True)
+    # Trials are only comparable under the same objective: refuse to extend a
+    # study made with another model, direction stats, prompts or penalties.
+    from .. import __version__
+    from ..stream import files_fingerprint
+    setup = {"model": files_fingerprint(model_dir), "stats": files_fingerprint(stats_path),
+             "data": revisions(), "seed": cfg.seed, "n_prompts": n_prompts,
+             "max_tokens": max_tokens, "kl_soft": kl_soft, "kl_weight": kl_weight,
+             "ppl_soft": ppl_soft, "objective": OBJECTIVE_VERSION}
+    check_study_setup(study, setup)
+    study.set_user_attr("li_version", __version__)
     # reseed per resume: a fixed seed replays the same random startup trials
     study.sampler = optuna.samplers.TPESampler(seed=cfg.seed + len(study.trials),
                                                n_startup_trials=10)
@@ -306,9 +334,14 @@ def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_rep
                 batch=batch, kind=judge_kind,
             )
             labels = [j["label"] for j in judged]
-            refusal = sum(x != "FULFILLED" for x in labels) / len(labels)
-            strict = sum(x == "REFUSAL" for x in labels) / len(labels)
-            partial = sum(x == "PARTIAL" for x in labels) / len(labels)
+            # unparsed labels are excluded, not counted as refusals; a finalist
+            # with too many is dropped (the judge is greedy, so a rerun can't help)
+            try:
+                rates = label_rates(labels, f"rerank of trial {trial.number}")
+            except RuntimeError as e:
+                print(f"  rerank {trial.number:3d}: skipped — {e}", flush=True)
+                continue
+            refusal, strict, partial = rates["refusal"], rates["strict"], rates["partial"]
             kl, ppl = trial.user_attrs["kl"], trial.user_attrs["ppl"]
             score = (refusal + kl_weight * kl + 3 * max(0.0, kl - kl_soft)
                      + 5 * max(0.0, ppl / base_ppl - ppl_soft))
@@ -320,7 +353,11 @@ def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_rep
                   f"(strict {strict:.0%}, partial {partial:.0%}) score {score:.3f}",
                   flush=True)
         if semantic:
-            chosen = min(candidates, key=lambda t: semantic[t.number]["score"])
+            chosen = min((t for t in candidates if t.number in semantic),
+                         key=lambda t: semantic[t.number]["score"])
+        else:
+            print("  warning: no finalist could be judged; keeping the search's best",
+                  flush=True)
         del judge, judge_tokenizer, judge_engine
         gc.collect()
         mx.clear_cache()

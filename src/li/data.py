@@ -4,6 +4,7 @@ Sources, all public:
 - harmful:  AdvBench (520 harmful behaviors)
 - harmless: Alpaca instruction subset (benign tasks)
 - over-refusal probe: XSTest (exaggerated-safety prompts)
+- perplexity: WikiText-2 test split
 
 Each source is pinned to a revision: the splits below are fixed slices of a
 seeded shuffle, so any upstream change would move prompts between them.
@@ -20,6 +21,8 @@ ADV_BENCH_CSV = (
 )
 HARMLESS_HF = "tatsu-lab/alpaca"
 HARMLESS_REVISION = "dce01c9b08f87459cf36a430d809084718273017"
+WIKITEXT_HF = "Salesforce/wikitext"
+WIKITEXT_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
 XSTEST_CSV = (
     "https://raw.githubusercontent.com/paul-rottger/xstest/"
     "d7bb5bd738c1fcbc36edd83d5e7d1b71a3e2d84d/xstest_prompts.csv"
@@ -77,3 +80,17 @@ def load_xstest(n: int = 100, seed: int = 0) -> list[str]:
     from datasets import load_dataset
     rows = load_dataset("csv", data_files=XSTEST_CSV, split="train")
     return _sample([r["prompt"] for r in rows if r["label"] == "safe"], n, seed)
+
+
+def load_wikitext() -> list[str]:
+    """Non-empty lines of the wikitext-2-raw-v1 test split (perplexity)."""
+    from datasets import load_dataset
+    rows = load_dataset(WIKITEXT_HF, "wikitext-2-raw-v1", split="test",
+                        revision=WIKITEXT_REVISION)
+    return [t for t in rows["text"] if t.strip()]
+
+
+def revisions() -> dict[str, str]:
+    """Every pinned prompt source, for run provenance."""
+    return {"advbench": ADV_BENCH_CSV, "alpaca": f"{HARMLESS_HF}@{HARMLESS_REVISION}",
+            "xstest": XSTEST_CSV, "wikitext": f"{WIKITEXT_HF}@{WIKITEXT_REVISION}"}

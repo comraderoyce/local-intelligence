@@ -43,10 +43,12 @@ def cmd_init(args: argparse.Namespace) -> None:
     abl_ok = ram >= spec.min_ram_gb
     train_ok = ram >= spec.train_ram_gb
     print(f"\n{spec.name}: {spec.params_b or '?'}B @ {bits}-bit on {ram}GB")
-    print(f"  download/measure/abliterate: {'OK' if abl_ok else 'BLOCKED — needs >= %dGB' % spec.min_ram_gb}")
+    fits = 'OK' if abl_ok else 'BLOCKED — needs >= %dGB' % spec.min_ram_gb
     if spec.moe:
-        print("  note: MoE — abliterate/optimize are not supported yet; chat, eval "
-              "and serve of the base model work")
+        print(f"  download/chat/eval/serve:    {fits}")
+        print("  abliterate/optimize:         UNSUPPORTED — MoE expert weights")
+    else:
+        print(f"  download/measure/abliterate: {fits}")
     print(f"  local LoRA training:         {'OK' if train_ok else 'BLOCKED — needs >= %dGB' % spec.train_ram_gb}")
     if not abl_ok and not args.force:
         raise SystemExit("refusing to write config for a model this machine cannot run (use --force)")

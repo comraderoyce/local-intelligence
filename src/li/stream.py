@@ -370,6 +370,29 @@ def resolve_model_dir(model_dir: str) -> tuple[str, str | None]:
     return model_dir, None
 
 
+FINGERPRINT_SUFFIXES = (".safetensors", ".json", ".jinja", ".model", ".txt")
+
+
+def files_fingerprint(*paths: str) -> str:
+    """Cheap identity of files or model dirs: name, size and mtime of each
+    weight, config, tokenizer and chat-template file. An adapter dir also
+    covers its base model."""
+    import hashlib
+    h = hashlib.sha256()
+    for path in paths:
+        p = Path(path)
+        if p.is_dir():
+            base, adapter = resolve_model_dir(path)
+            files = [f for d in filter(None, (base, adapter)) for f in sorted(Path(d).iterdir())
+                     if f.is_file() and f.suffix in FINGERPRINT_SUFFIXES]
+        else:
+            files = [p]
+        for f in files:
+            st = f.stat()
+            h.update(f"{f}:{st.st_size}:{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()[:16]
+
+
 def load_streamed(model_dir: str, budget_gb: float | None = None, prepare=None):
     """(model, tokenizer, engine) with at most ~budget_gb of weights resident.
     `prepare(model)` runs before streaming is set up, e.g. to wrap modules

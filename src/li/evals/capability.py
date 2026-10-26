@@ -12,15 +12,9 @@ MIN_WINDOWS = 3
 
 def perplexity(model, tokenizer, cfg: Config) -> float:
     """exp(mean NLL) over predicted positions of consecutive max_seq windows."""
-    from datasets import load_dataset
+    from li.data import load_wikitext
 
-    texts = [
-        ex["text"]
-        for ex in load_dataset(
-            "Salesforce/wikitext", "wikitext-2-raw-v1", split="test"
-        )
-        if ex["text"].strip()
-    ]
+    texts = load_wikitext()
     ids = tokenizer.encode("\n\n".join(texts))
     need = MIN_WINDOWS * cfg.max_seq
     if len(ids) < need:

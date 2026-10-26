@@ -18,10 +18,24 @@ def _pull(repo: str, target: Path, what: str) -> None:
     try:
         snapshot_download(repo_id=repo, local_dir=target)
     except Exception as e:
-        if not (target / "config.json").exists():
-            raise
+        missing = missing_weights(target)
+        if missing:
+            raise SystemExit(f"couldn't reach the hub for {repo} ({type(e).__name__}) "
+                             f"and {target} is incomplete: missing {', '.join(missing)}")
         print(f"warning: couldn't check {repo} against the hub ({type(e).__name__}); "
               f"using {target} as-is")
+
+
+def missing_weights(target: Path) -> list[str]:
+    """Files a model dir still needs: config, and every shard its index names
+    (or at least one shard when unsharded)."""
+    if not (target / "config.json").exists():
+        return ["config.json"]
+    index = target / "model.safetensors.index.json"
+    if index.exists():
+        shards = set(json.loads(index.read_text())["weight_map"].values())
+        return sorted(s for s in shards if not (target / s).exists())
+    return [] if any(target.glob("*.safetensors")) else ["*.safetensors"]
 
 
 def download_draft(cfg: Config) -> None:
