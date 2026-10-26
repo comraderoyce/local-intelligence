@@ -415,7 +415,7 @@ requires-dist = [
     { name = "datasets", specifier = ">=3.0" },
     { name = "huggingface-hub", specifier = ">=0.34" },
     { name = "mlx", specifier = ">=0.29" },
-    { name = "mlx-lm", specifier = ">=0.25" },
+    { name = "mlx-lm", specifier = ">=0.32,<0.33" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "optuna", specifier = ">=4.0" },
     { name = "safetensors", specifier = ">=0.5" },

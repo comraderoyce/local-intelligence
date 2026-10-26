@@ -45,7 +45,7 @@ MODELS: dict[str, ModelSpec] = {
     "qwen3-30b-a3b": ModelSpec(
         "qwen3-30b-a3b", "Qwen/Qwen3-30B-A3B", "mlx-community/Qwen3-30B-A3B-3bit",
         30.5, 3, 64, 16, 64, moe=True,
-        note="MoE; abliterate+inference on 16GB, training needs >=64GB",
+        note="MoE: chat/serve only, expert weights can't be abliterated yet",
     ),
     "qwen3-32b": ModelSpec(
         "qwen3-32b", "Qwen/Qwen3-32B", "mlx-community/Qwen3-32B-3bit",
@@ -98,6 +98,21 @@ def check_inference_fits(model_dir: str, force: bool = False) -> None:
     print("WARNING: " + msg)
 
 
+MOE_KEYS = ("num_experts", "num_local_experts", "n_routed_experts", "moe_intermediate_size")
+
+
+def check_abliteration_supported(model_dir: str) -> None:
+    """Refuse MoE models up front: the adapter writer can't edit per-expert
+    weights, and finding that out at the end of `li optimize` wastes the search."""
+    import json
+    from pathlib import Path
+    cfg = json.loads((Path(model_dir) / "config.json").read_text())
+    cfg = {**cfg, **cfg.get("text_config", {})}
+    if any(cfg.get(k) for k in MOE_KEYS):
+        raise SystemExit(f"{model_dir} is a mixture-of-experts model; abliterating "
+                         "expert weights isn't supported yet (chat and serve work)")
+
+
 def resolve_spec(name_or_hf_id: str) -> ModelSpec:
     if name_or_hf_id in MODELS:
         return MODELS[name_or_hf_id]
@@ -120,7 +135,8 @@ def spec_for(name: str, repo: str) -> ModelSpec:
 
 
 def fit_report(spec: ModelSpec, ram_gb: int) -> str:
-    abl = "OK" if ram_gb >= spec.min_ram_gb else f"NO (needs >= {spec.min_ram_gb}GB)"
+    abl = ("UNSUPPORTED (MoE)" if spec.moe else
+           "OK" if ram_gb >= spec.min_ram_gb else f"NO (needs >= {spec.min_ram_gb}GB)")
     train = "OK" if ram_gb >= spec.train_ram_gb else f"NO (needs >= {spec.train_ram_gb}GB)"
     moe = " [MoE]" if spec.moe else ""
     return (

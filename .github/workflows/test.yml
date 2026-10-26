@@ -17,3 +17,17 @@ jobs:
       - run: uv sync --locked
       - run: uv run pytest -q tests
       - run: uv run li --help
+
+  package:
+    # the built wheel must install and run on its own, outside the dev venv
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv build
+      - run: uv venv /tmp/wheel-env
+      - run: uv pip install --python /tmp/wheel-env dist/*.whl
+      - run: /tmp/wheel-env/bin/li --version
+      - run: /tmp/wheel-env/bin/li --help

@@ -74,26 +74,100 @@ class RegistryTests(unittest.TestCase):
 
 
 class EvalSummaryTests(unittest.TestCase):
-    def test_unparsed_judge_labels_are_excluded_and_counted(self):
-        import tempfile
+    def _run(self, labels, tmp, model_dir="m"):
         from pathlib import Path
         from unittest import mock
 
         import li.evals as ev
         from li.config import Config
-        cfg = Config(name="t", repo="t/t", model_dir="m", n_advbench_eval=4, n_xstest_eval=2)
-        prompts = {"advbench": ["a1", "a2", "a3", "a4"], "xstest": ["x1", "x2"]}
-        labels = iter(["REFUSAL", None, "FULFILLED", "FULFILLED", "FULFILLED", "FULFILLED"])
-        with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(ev, "load_advbench", return_value=prompts["advbench"]), \
+        cfg = Config(name="t", repo="t/t", model_dir=model_dir)
+        prompts = {"advbench": [f"a{i}" for i in range(50)],
+                   "xstest": [f"x{i}" for i in range(50)]}
+        labels = iter(labels)
+        generated = []
+
+        def complete(m, t, ps, c):
+            generated.extend(ps)
+            return ["r"] * len(ps)
+
+        with mock.patch.object(ev, "load_advbench", return_value=prompts["advbench"]), \
                 mock.patch.object(ev, "load_xstest", return_value=prompts["xstest"]), \
                 mock.patch.object(ev, "_load", return_value=(None, None, None)), \
-                mock.patch.object(ev, "complete", side_effect=lambda m, t, ps, c: ["r"] * len(ps)), \
+                mock.patch.object(ev, "complete", side_effect=complete), \
                 mock.patch.object(ev, "perplexity", return_value=10.0), \
                 mock.patch.object(ev, "judge_responses", side_effect=lambda m, t, pairs, **k: [
                     {"label": next(labels), "raw": "", "version": "v"} for _ in pairs]):
-            results, _ = ev.run_eval_suite({"base": "m"}, cfg, Path(tmp), judge_dir="j")
-        row = results["base"]
+            results, _ = ev.run_eval_suite({"base": model_dir}, cfg, Path(tmp), judge_dir="j")
+        return results, generated
+
+    def test_one_unparsed_label_is_excluded_and_counted(self):
+        import tempfile
+        labels = ["REFUSAL", None] + ["FULFILLED"] * 98
+        with tempfile.TemporaryDirectory() as tmp:
+            row = self._run(labels, tmp, tmp)[0]["base"]
         self.assertEqual(row["advbench_refusal_unjudged"], 1.0)
-        self.assertAlmostEqual(row["advbench_refusal"], 1 / 3)
+        self.assertAlmostEqual(row["advbench_refusal"], 1 / 49)
         self.assertEqual(row["xstest_overrefusal"], 0.0)
+
+    def test_too_many_unparsed_labels_fail_the_eval(self):
+        import tempfile
+        labels = [None] * 2 + ["FULFILLED"] * 98   # 2/50 = 4% > 2%
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(RuntimeError):
+            self._run(labels, tmp, tmp)
+
+    def test_saved_responses_are_reused_only_for_unchanged_model(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as model:
+            weights = Path(model) / "model.safetensors"
+            weights.write_bytes(b"v1")
+            self.assertEqual(len(self._run(["FULFILLED"] * 100, tmp, model)[1]), 100)
+            self.assertEqual(self._run(["FULFILLED"] * 100, tmp, model)[1], [])
+            weights.write_bytes(b"v2")   # e.g. `li optimize` rewrote the adapter
+            os.utime(weights, ns=(1, 1))
+            self.assertEqual(len(self._run(["FULFILLED"] * 100, tmp, model)[1]), 100)
+
+
+class DataSourceTests(unittest.TestCase):
+    def test_xstest_keeps_only_safe_prompts(self):
+        from unittest import mock
+
+        import li.data as data
+        rows = [{"prompt": f"safe {i}", "label": "safe"} for i in range(250)] + \
+               [{"prompt": f"unsafe {i}", "label": "unsafe"} for i in range(200)]
+        with mock.patch("datasets.load_dataset", return_value=rows):
+            prompts = data.load_xstest(250)
+        self.assertTrue(all(p.startswith("safe") for p in prompts))
+
+
+class GuardrailTests(unittest.TestCase):
+    def test_moe_models_are_refused_for_abliteration(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from li.registry import check_abliteration_supported
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "config.json"
+            cfg.write_text(json.dumps({"num_hidden_layers": 4}))
+            check_abliteration_supported(d)
+            cfg.write_text(json.dumps({"text_config": {"num_experts": 128}}))
+            with self.assertRaises(SystemExit):
+                check_abliteration_supported(d)
+
+    def test_unknown_config_keys_warn_and_load(self):
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+
+        from li.config import load_config
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "li.toml"
+            path.write_text('name = "t"\nrepo = "t/t"\nmodel_dir = "m"\nold_key = 1\n')
+            out = io.StringIO()
+            with redirect_stdout(out):
+                cfg = load_config(path)
+        self.assertEqual(cfg.name, "t")
+        self.assertIn("old_key", out.getvalue())

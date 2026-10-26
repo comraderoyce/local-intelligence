@@ -90,4 +90,9 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         raise SystemExit(f"no {CONFIG_PATH} here — run `li init` first")
     data = tomllib.loads(path.read_text())
     known = {f.name for f in fields(Config)}
+    unknown = sorted(set(data) - known)
+    if unknown:
+        # a warning, not an error: keys renamed or dropped between versions
+        # shouldn't strand an existing workspace
+        print(f"warning: ignoring unknown {path} keys: {', '.join(unknown)}")
     return Config(**{k: v for k, v in data.items() if k in known})

@@ -8,39 +8,49 @@ from .config import Config
 from .registry import JUDGE_DIR, JUDGE_REPO, spec_for
 
 
+def _pull(repo: str, target: Path, what: str) -> None:
+    """Always ask the hub: it resumes an interrupted download and returns at
+    once when complete. Checking for config.json alone treated a partial
+    download (config arrives first) as done. Offline, a local copy is used
+    as-is with a warning."""
+    from huggingface_hub import snapshot_download
+    print(f"pulling {what} {repo} -> {target}")
+    try:
+        snapshot_download(repo_id=repo, local_dir=target)
+    except Exception as e:
+        if not (target / "config.json").exists():
+            raise
+        print(f"warning: couldn't check {repo} against the hub ({type(e).__name__}); "
+              f"using {target} as-is")
+
+
 def download_draft(cfg: Config) -> None:
     """Pull the registry's speculative-decoding draft model, if it has one."""
     spec = spec_for(cfg.name, cfg.repo)
-    if not spec.draft_repo or cfg.draft_dir:
-        return
-    from huggingface_hub import snapshot_download
-    cfg.draft_dir = f"models/{spec.draft_repo.split('/')[-1].lower()}"
-    if not (Path(cfg.draft_dir) / "config.json").exists():
-        print(f"pulling draft model {spec.draft_repo} -> {cfg.draft_dir}")
-        snapshot_download(repo_id=spec.draft_repo, local_dir=cfg.draft_dir)
+    default = f"models/{spec.draft_repo.split('/')[-1].lower()}"
+    if not spec.draft_repo or cfg.draft_dir not in ("", default):
+        return  # none, or the user pointed draft_dir elsewhere
+    cfg.draft_dir = default
+    _pull(spec.draft_repo, Path(default), "draft model")
 
 
 def download_judge(cfg: Config) -> None:
     """Pull the default refusal judge when the config points at it."""
-    if cfg.judge_dir != JUDGE_DIR or (Path(cfg.judge_dir) / "config.json").exists():
+    if cfg.judge_dir != JUDGE_DIR:
         return
-    from huggingface_hub import snapshot_download
-    print(f"pulling refusal judge {JUDGE_REPO} -> {cfg.judge_dir}")
-    snapshot_download(repo_id=JUDGE_REPO, local_dir=cfg.judge_dir)
+    _pull(JUDGE_REPO, Path(cfg.judge_dir), "refusal judge")
 
 
 def download_model(cfg: Config) -> Path:
     target = Path(cfg.model_dir)
-    if (target / "config.json").exists():
-        print(f"model already present: {target}")
-        return target
-
-    from huggingface_hub import snapshot_download
     spec = spec_for(cfg.name, cfg.repo)
     mlx_repo = spec.mlx_repo
     if mlx_repo:
-        print(f"pulling pre-quantized {mlx_repo} -> {target}")
-        snapshot_download(repo_id=mlx_repo, local_dir=target)
+        _pull(mlx_repo, target, "pre-quantized model")
+    elif (target / "tokenizer_config.json").exists():
+        # mlx_lm.convert writes weights, then config, then tokenizer files
+        print(f"model already present: {target}")
+        return target
     else:
         from mlx_lm import convert
         print(f"converting {cfg.repo} -> {target} ({cfg.quant_bits}-bit, group {cfg.quant_group})")

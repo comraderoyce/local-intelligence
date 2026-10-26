@@ -44,6 +44,9 @@ def cmd_init(args: argparse.Namespace) -> None:
     train_ok = ram >= spec.train_ram_gb
     print(f"\n{spec.name}: {spec.params_b or '?'}B @ {bits}-bit on {ram}GB")
     print(f"  download/measure/abliterate: {'OK' if abl_ok else 'BLOCKED — needs >= %dGB' % spec.min_ram_gb}")
+    if spec.moe:
+        print("  note: MoE — abliterate/optimize are not supported yet; chat, eval "
+              "and serve of the base model work")
     print(f"  local LoRA training:         {'OK' if train_ok else 'BLOCKED — needs >= %dGB' % spec.train_ram_gb}")
     if not abl_ok and not args.force:
         raise SystemExit("refusing to write config for a model this machine cannot run (use --force)")
@@ -103,6 +106,8 @@ def cmd_select(args: argparse.Namespace) -> None:
 
 def cmd_optimize(args: argparse.Namespace) -> None:
     cfg = load_config()
+    from .registry import check_abliteration_supported
+    check_abliteration_supported(cfg.model_dir)
     from .abliteration.optimize import optimize
     out = args.out or cfg.abliterated_dir
     warm = []
@@ -144,7 +149,9 @@ def cmd_abliterate(args: argparse.Namespace) -> None:
     embed = pick(args.embed, cfg.embed_ablate)
     project = pick(args.project_harmless, cfg.project_harmless)
     from .abliteration import apply_abliteration
+    from .registry import check_abliteration_supported
     base = args.base or cfg.model_dir
+    check_abliteration_supported(base)
     out = args.out or cfg.abliterated_dir
     res = apply_abliteration(base, cfg.stats_path, layer, alpha, out, from_layer,
                              pos, n_dirs, embed, project, args.row_normalization)
@@ -252,7 +259,8 @@ def cmd_fuse(args: argparse.Namespace) -> None:
     out = args.out or cfg.fused_dir
     from .train import fuse_adapter
     fuse_adapter(base, adapter, out)
-    print(f"fused model: {out} — serve with `li chat --dir {out}` or mlx_lm.server")
+    print(f"fused model: {out} — try it with `li chat --dir {out}`, serve it with "
+          f"`li serve --dir {out}`")
 
 
 def cmd_export(args: argparse.Namespace) -> None:
@@ -360,7 +368,9 @@ def cmd_bench(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from . import __version__
     p = argparse.ArgumentParser(prog="li", description=__doc__)
+    p.add_argument("--version", action="version", version=f"li {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("init", help="choose a model, write li.toml (RAM-aware)")

@@ -5,19 +5,25 @@ Sources, all public:
 - harmless: Alpaca instruction subset (benign tasks)
 - over-refusal probe: XSTest (exaggerated-safety prompts)
 
-Cached under datasets/ by the HF datasets library.
+Each source is pinned to a revision: the splits below are fixed slices of a
+seeded shuffle, so any upstream change would move prompts between them.
+AdvBench and XSTest come from their authors' repos rather than the gated HF
+mirrors, so results don't depend on whether the user has an HF token.
 """
 from __future__ import annotations
 
 import random
 
-ADV_BENCH_HF = "walledai/AdvBench"
 ADV_BENCH_CSV = (
-    "https://raw.githubusercontent.com/llm-attacks/llm-attacks/main/"
-    "data/advbench/harmful_behaviors.csv"
+    "https://raw.githubusercontent.com/llm-attacks/llm-attacks/"
+    "098262edf85f807224e70ecd87b9d83716bf6b73/data/advbench/harmful_behaviors.csv"
 )
 HARMLESS_HF = "tatsu-lab/alpaca"
-XSTEST_HF = "walledai/XSTest"
+HARMLESS_REVISION = "dce01c9b08f87459cf36a430d809084718273017"
+XSTEST_CSV = (
+    "https://raw.githubusercontent.com/paul-rottger/xstest/"
+    "d7bb5bd738c1fcbc36edd83d5e7d1b71a3e2d84d/xstest_prompts.csv"
+)
 
 # Fixed, non-overlapping slices of the once-shuffled corpora.  Changing the
 # requested sample count must not silently move examples between development
@@ -54,37 +60,20 @@ def _sample(prompts: list[str], n: int, seed: int, split: str | None = None) -> 
 def load_advbench(n: int = 128, seed: int = 0,
                   split: str | None = None) -> list[str]:
     from datasets import load_dataset
-    try:
-        rows = load_dataset(ADV_BENCH_HF, split="train")
-        prompts = rows["prompt"]
-    except Exception:
-        rows = load_dataset("csv", data_files=ADV_BENCH_CSV, split="train")
-        prompts = rows["goal"]
-    return _sample(list(prompts), n, seed, split)
+    rows = load_dataset("csv", data_files=ADV_BENCH_CSV, split="train")
+    return _sample(list(rows["goal"]), n, seed, split)
 
 
 def load_harmless(n: int = 128, seed: int = 0,
                   split: str | None = None) -> list[str]:
     from datasets import load_dataset
-    rows = load_dataset(HARMLESS_HF, split="train")
+    rows = load_dataset(HARMLESS_HF, split="train", revision=HARMLESS_REVISION)
     return _sample([r["instruction"] for r in rows], n, seed, split)
 
 
 def load_xstest(n: int = 100, seed: int = 0) -> list[str]:
+    """XSTest's 250 safe prompts; the 200 unsafe contrast prompts should be
+    refused, so including them would inflate the over-refusal rate."""
     from datasets import load_dataset
-    try:
-        rows = load_dataset(XSTEST_HF, split="train")
-        prompts = rows["prompt"]
-    except Exception:  # walledai/XSTest is gated; official safe prompts from the authors
-        rows = load_dataset(
-            "csv",
-            data_files=(
-                "https://raw.githubusercontent.com/paul-rottger/xstest/main/"
-                "xstest_prompts.csv"
-            ),
-            split="train",
-        )
-        prompts = [
-            r["prompt"] for r in rows if str(r.get("label", "safe")) == "safe"
-        ]
-    return _sample(list(prompts), n, seed)
+    rows = load_dataset("csv", data_files=XSTEST_CSV, split="train")
+    return _sample([r["prompt"] for r in rows if r["label"] == "safe"], n, seed)

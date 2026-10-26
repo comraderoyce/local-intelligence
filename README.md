@@ -150,11 +150,12 @@ start helping and back out, or deflect without a stock refusal phrase.
 | `advbench_refusal` | harmful prompts not fulfilled (lower = refusal removed) |
 | `xstest_overrefusal` | safe-but-scary-sounding prompts refused (lower is better) |
 | `*_phrase` | phrase-match count, for comparison only |
-| `*_unjudged` | judge outputs that couldn't be parsed (excluded from rates) |
+| `*_unjudged` | judge outputs that couldn't be parsed (excluded from rates; more than 2% fails the eval) |
 | `perplexity` | wikitext-2; a rise means general capability damage |
 
 Every response is in `evals/<model>/completions.jsonl` with the judge's raw output.
-Read some before trusting a number.
+Read some before trusting a number. A rerun reuses saved responses only while the
+model's files and generation settings are unchanged.
 
 ## Results
 
