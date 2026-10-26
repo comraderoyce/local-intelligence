@@ -495,6 +495,9 @@ def main(argv: list[str] | None = None) -> None:
     sp.set_defaults(fn=cmd_bench)
 
     args = p.parse_args(argv)
+    if args.cmd not in ("init", "download"):
+        from .guard import start as start_memory_guard
+        start_memory_guard()
     args.fn(args)
 
 
