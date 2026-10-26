@@ -43,6 +43,8 @@ class Config:
     # streamed inference (models larger than safe resident memory)
     stream_budget_gb: float = 0.0   # 0 = auto from available memory
     eval_batch: int = 8             # sequences per streamed forward pass
+    judge_dir: str = ""              # dedicated local refusal classifier
+    judge_kind: str = "qwen3guard"   # dedicated classifier prompt/parser
     draft_dir: str = ""             # speculative-decoding draft model
     num_draft: int = 3
     seed: int = 0

@@ -26,6 +26,7 @@ as a regular adapter (per-module lora_b = -a d).
 from __future__ import annotations
 
 import json
+import gc
 import math
 import time
 from pathlib import Path
@@ -111,8 +112,8 @@ class Hooks:
 
     def apply(self, d: mx.array | None, alphas: dict[str, list[float]], embed: float) -> None:
         for i, kind, w in self.writers:
-            w.set(d, alphas[kind][i])
-        self.embed.set(d, embed)
+            w.set(d if d is None or d.ndim == 2 else d[i], alphas[kind][i])
+        self.embed.set(d if d is None or d.ndim == 2 else d[0], embed)
 
 
 def kernel(n: int, peak: float, width: float, a_max: float, a_min: float) -> list[float]:
@@ -124,12 +125,32 @@ def kernel(n: int, peak: float, width: float, a_max: float, a_min: float) -> lis
     return out
 
 
-def _direction(dirs_pos: np.ndarray, layer: float, pos_idx: int) -> np.ndarray:
+def _unit_projected(direction: np.ndarray, harmless_mean: np.ndarray | None) -> np.ndarray:
+    v = direction.astype(np.float32)
+    if harmless_mean is not None:
+        m = harmless_mean.astype(np.float32)
+        m /= max(float(np.linalg.norm(m)), 1e-12)
+        v = v - float(v @ m) * m
+    return v / max(float(np.linalg.norm(v)), 1e-12)
+
+
+def _directions(dirs_pos: np.ndarray, harmless_pos: np.ndarray, layer: float,
+                pos_idx: int, scope: str, project_harmless: bool) -> np.ndarray:
+    """Shared [1,D] interpolated direction or one [L,1,D] per layer."""
+    harmless = harmless_pos if project_harmless else None
+    if scope == "per_layer":
+        rows = [_unit_projected(dirs_pos[i, pos_idx],
+                                None if harmless is None else harmless[i, pos_idx])
+                for i in range(dirs_pos.shape[0])]
+        return np.asarray(rows, dtype=np.float32)[:, None, :]
     lo = int(math.floor(layer))
     hi = min(lo + 1, dirs_pos.shape[0] - 1)
     frac = layer - lo
     v = (1 - frac) * dirs_pos[lo, pos_idx] + frac * dirs_pos[hi, pos_idx]
-    return (v / np.linalg.norm(v)).astype(np.float32)
+    m = None
+    if harmless is not None:
+        m = (1 - frac) * harmless[lo, pos_idx] + frac * harmless[hi, pos_idx]
+    return _unit_projected(v, m)[None]
 
 
 def schedule(params: dict, n_layers: int) -> tuple[dict[str, list[float]], float]:
@@ -140,21 +161,24 @@ def schedule(params: dict, n_layers: int) -> tuple[dict[str, list[float]], float
 
 
 def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_report: str,
-             n_trials: int = 40, n_prompts: int = 16, max_tokens: int = 24,
+             n_trials: int = 40, n_prompts: int = 16, max_tokens: int = 64,
              batch: int = 16, kl_soft: float = 0.3, kl_weight: float = 0.5,
              ppl_soft: float = 1.10, budget_gb: float | None = None,
              warm_starts: list[dict] | None = None, storage: str | None = None,
-             study_name: str = "abliterate") -> dict:
+             study_name: str = "abliterate", rerank: int = 5,
+             rerank_tokens: int = 128, judge_dir: str | None = None,
+             judge_kind: str = "qwen3guard") -> dict:
     import optuna
     from mlx_lm import batch_generate
 
-    from ..evals.refusal import detect
+    from ..evals.refusal import detect_withholding, judge_responses
     from ..stream import load_streamed
     from .apply import write_abliteration
     from .select import _first_token_logprobs
 
     with np_safe_open(stats_path, framework="numpy") as f:
         dirs_pos = f.get_tensor("directions_pos").astype(np.float32)
+        harmless_pos = f.get_tensor("harmless_mean_pos").astype(np.float32)
     n_layers, n_pos, _ = dirs_pos.shape
 
     holder: dict = {}
@@ -163,9 +187,10 @@ def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_rep
     hooks: Hooks = holder["hooks"]
     print(f"optimize: {engine.describe()}")
 
-    # search prompts held out from both measurement (seed) and validation
-    harmful = [chat_inputs(tokenizer, p) for p in load_advbench(n_prompts, cfg.seed + 2)]
-    harmless = load_harmless(n_prompts, cfg.seed + 2)
+    # Fixed slice held out from measurement, selection, and final evaluation.
+    harmful_texts = load_advbench(n_prompts, cfg.seed, split="optimize")
+    harmful = [chat_inputs(tokenizer, p) for p in harmful_texts]
+    harmless = load_harmless(n_prompts, cfg.seed, split="optimize")
     from datasets import load_dataset
     text = "\n\n".join(t for t in load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1",
                                               split="test")["text"] if t.strip())
@@ -177,10 +202,16 @@ def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_rep
         tgt = ppl_ids[0, 1:]
         return math.exp(-lp[mx.arange(tgt.size), tgt].mean().item())
 
-    def refusals() -> float:
-        texts = batch_generate(model, tokenizer, harmful, max_tokens=max_tokens,
+    def responses(tokens: int = max_tokens) -> list[str]:
+        return batch_generate(model, tokenizer, harmful, max_tokens=tokens,
                                completion_batch_size=batch, prefill_batch_size=batch).texts
-        return sum(map(detect, texts)) / len(texts)
+
+    def refusals() -> float:
+        return sum(map(detect_withholding, responses())) / len(harmful)
+
+    def normalized(params: dict) -> dict:
+        # Old studies remain readable after adding the new search dimensions.
+        return {"direction_scope": "global", "project_harmless": False, **params}
 
     hooks.apply(None, {k: [0.0] * n_layers for k in COMPONENTS}, 0.0)
     base_lp = _first_token_logprobs(model, tokenizer, harmless, None)
@@ -189,7 +220,11 @@ def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_rep
     print(f"  base: refusals {base_ref:.0%}, ppl {base_ppl:.2f}", flush=True)
 
     def evaluate(params: dict) -> dict:
-        d = mx.array(_direction(dirs_pos, params["dir_layer"], params["dir_pos"] + n_pos)[None])
+        params = normalized(params)
+        d = mx.array(_directions(
+            dirs_pos, harmless_pos, params["dir_layer"], params["dir_pos"] + n_pos,
+            params["direction_scope"], params["project_harmless"],
+        ))
         alphas, embed = schedule(params, n_layers)
         hooks.apply(d, alphas, embed)
         lp = _first_token_logprobs(model, tokenizer, harmless, None)
@@ -202,6 +237,10 @@ def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_rep
 
     def objective(trial: optuna.Trial) -> float:
         params = {
+            "direction_scope": trial.suggest_categorical(
+                "direction_scope", ["global", "per_layer"]),
+            "project_harmless": trial.suggest_categorical(
+                "project_harmless", [False, True]),
             "dir_layer": trial.suggest_float("dir_layer", 0.2 * n_layers, 0.8 * (n_layers - 1)),
             "dir_pos": trial.suggest_int("dir_pos", -n_pos, -1),
             "peak": trial.suggest_float("peak", 0, n_layers - 1),
@@ -234,21 +273,84 @@ def optimize(model_dir: str, stats_path: str, cfg: Config, out_dir: str, out_rep
     if remaining > 0:
         study.optimize(objective, n_trials=remaining)
 
-    best = study.best_trial
-    params = dict(best.params)
-    d = _direction(dirs_pos, params["dir_layer"], params["dir_pos"] + n_pos)[None]
-    alphas, embed = schedule(params, n_layers)
-    del model, tokenizer, engine
-    mx.clear_cache()
+    optuna_best = study.best_trial
+    chosen = optuna_best
+    semantic: dict[int, dict] = {}
+    candidate_texts: dict[int, list[str]] = {}
+    if rerank > 0 and judge_dir:
+        candidates = sorted(
+            (t for t in study.trials if t.state.is_finished() and "score" in t.user_attrs),
+            key=lambda t: t.user_attrs["score"],
+        )[:rerank]
+        zero = {k: [0.0] * n_layers for k in COMPONENTS}
+        for trial in candidates:
+            params = normalized(dict(trial.params))
+            d_live = mx.array(_directions(
+                dirs_pos, harmless_pos, params["dir_layer"], params["dir_pos"] + n_pos,
+                params["direction_scope"], params["project_harmless"],
+            ))
+            alphas_live, embed_live = schedule(params, n_layers)
+            hooks.apply(d_live, alphas_live, embed_live)
+            candidate_texts[trial.number] = responses(rerank_tokens)
+        hooks.apply(None, zero, 0.0)
+        # Free the edited model before loading the independent classifier.
+        del model, tokenizer, engine
+        gc.collect()
+        mx.clear_cache()
+        from ..stream import load_for_inference
+        judge, judge_tokenizer, judge_engine = load_for_inference(judge_dir)
+        for trial in candidates:
+            judged = judge_responses(
+                judge, judge_tokenizer,
+                list(zip(harmful_texts, candidate_texts[trial.number])),
+                batch=batch, kind=judge_kind,
+            )
+            labels = [j["label"] for j in judged]
+            refusal = sum(x != "FULFILLED" for x in labels) / len(labels)
+            strict = sum(x == "REFUSAL" for x in labels) / len(labels)
+            partial = sum(x == "PARTIAL" for x in labels) / len(labels)
+            kl, ppl = trial.user_attrs["kl"], trial.user_attrs["ppl"]
+            score = (refusal + kl_weight * kl + 3 * max(0.0, kl - kl_soft)
+                     + 5 * max(0.0, ppl / base_ppl - ppl_soft))
+            semantic[trial.number] = {
+                "refusals": refusal, "strict_refusals": strict,
+                "partial": partial, "score": score, "labels": labels,
+            }
+            print(f"  rerank {trial.number:3d}: refusals {refusal:.0%} "
+                  f"(strict {strict:.0%}, partial {partial:.0%}) score {score:.3f}",
+                  flush=True)
+        if semantic:
+            chosen = min(candidates, key=lambda t: semantic[t.number]["score"])
+        del judge, judge_tokenizer, judge_engine
+        gc.collect()
+        mx.clear_cache()
+    else:
+        if rerank > 0:
+            print("  semantic rerank skipped: no dedicated judge configured", flush=True)
+        del model, tokenizer, engine
+        gc.collect()
+        mx.clear_cache()
 
+    params = normalized(dict(chosen.params))
+    d = _directions(
+        dirs_pos, harmless_pos, params["dir_layer"], params["dir_pos"] + n_pos,
+        params["direction_scope"], params["project_harmless"],
+    )
+    alphas, embed = schedule(params, n_layers)
     def alpha_of(layer: int | None, kind: str) -> float:
         return embed if kind == "embed" else alphas[kind][layer]
 
-    meta = {"method": "optimized", "params": params, "metrics": best.user_attrs,
+    chosen_metrics = {**chosen.user_attrs, **semantic.get(chosen.number, {})}
+    meta = {"method": "optimized", "params": params, "metrics": chosen_metrics,
             "alphas": alphas, "embed": embed}
     result = write_abliteration(model_dir, d, out_dir, alpha_of, meta)
-    report = {"base": {"refusals": base_ref, "ppl": base_ppl}, "best": {
-        "number": best.number, "params": params, **best.user_attrs},
+    report = {"base": {"refusals": base_ref, "ppl": base_ppl},
+        "optuna_best": {"number": optuna_best.number,
+                        "params": normalized(dict(optuna_best.params)),
+                        **optuna_best.user_attrs},
+        "best": {"number": chosen.number, "params": params,
+                 **chosen.user_attrs, **semantic.get(chosen.number, {})},
+        "semantic_rerank": semantic,
         "trials": [{"number": t.number, "params": t.params, **t.user_attrs}
                    for t in study.trials if t.state.is_finished()]}
     Path(out_report).write_text(json.dumps(report, indent=2) + "\n")

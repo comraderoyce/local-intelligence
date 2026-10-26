@@ -86,9 +86,9 @@ def select_direction(model_dir: str, stats_path: str, cfg: Config, out_report: s
     n_pos = dirs_all.shape[1]
     model, tokenizer, engine = load_streamed(model_dir, budget_gb)
     print(f"selection: {engine.describe()}")
-    # held out from measurement: a different seed's samples
-    harmful = load_advbench(n_prompts, cfg.seed + 1)
-    harmless = load_harmless(n_prompts, cfg.seed + 1)
+    # A fixed disjoint slice: different shuffled prefixes are not held out.
+    harmful = load_advbench(n_prompts, cfg.seed, split="select")
+    harmless = load_harmless(n_prompts, cfg.seed, split="select")
     refusal_ids = mx.array(_refusal_token_ids(tokenizer))
 
     def refusal_score(lp: mx.array) -> float:

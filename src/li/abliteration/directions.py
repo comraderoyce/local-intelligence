@@ -96,8 +96,8 @@ def _capture(model, tokenizer, harmful: list[str], harmless: list[str], n_pos: i
 def measure_directions(model_dir: str, cfg: Config,
                        out_stats: str, out_report: str) -> dict:
     model, tokenizer = load(model_dir, lazy=True)
-    harmful = load_advbench(cfg.n_harmful, cfg.seed)
-    harmless = load_harmless(cfg.n_harmless, cfg.seed)
+    harmful = load_advbench(cfg.n_harmful, cfg.seed, split="measure")
+    harmless = load_harmless(cfg.n_harmless, cfg.seed, split="measure")
     n_pos = template_suffix_len(tokenizer)
 
     # one pass over both sets: layers are consumed as they are captured

@@ -107,12 +107,17 @@ def cmd_optimize(args: argparse.Namespace) -> None:
         n = json.loads(Path(cfg.report_path).read_text())["n_layers"]
         warm.append({"dir_layer": float(cfg.layer), "dir_pos": cfg.pos, "peak": (n - 1) / 2,
                      "width": float(n), "attn_max": 1.0, "attn_min_frac": 1.0,
-                     "mlp_max": 1.0, "mlp_min_frac": 1.0, "embed": 1.0})
+                     "mlp_max": 1.0, "mlp_min_frac": 1.0, "embed": 1.0,
+                     "direction_scope": "global",
+                     "project_harmless": cfg.project_harmless})
     rep = optimize(cfg.model_dir, cfg.stats_path, cfg, out, f"{cfg.run_dir}/optimize.json",
                    n_trials=args.trials, n_prompts=args.n, max_tokens=args.max_tokens,
                    batch=args.batch, kl_soft=args.kl_soft, budget_gb=args.budget_gb,
                    warm_starts=warm + [json.loads(w) for w in args.warm],
-                   storage=f"sqlite:///{cfg.run_dir}/optimize.db", study_name=args.study)
+                   storage=f"sqlite:///{cfg.run_dir}/optimize.db", study_name=args.study,
+                   rerank=args.rerank, rerank_tokens=args.rerank_tokens,
+                   judge_dir=args.judge or cfg.judge_dir or None,
+                   judge_kind=args.judge_kind or cfg.judge_kind)
     b = rep["best"]
     print(f"\nbest trial {b['number']}: refusals {b['refusals']:.0%} (base "
           f"{rep['base']['refusals']:.0%}), kl {b['kl']:.3f}, ppl {b['ppl']:.2f} "
@@ -138,7 +143,7 @@ def cmd_abliterate(args: argparse.Namespace) -> None:
     base = args.base or cfg.model_dir
     out = args.out or cfg.abliterated_dir
     res = apply_abliteration(base, cfg.stats_path, layer, alpha, out, from_layer,
-                             pos, n_dirs, embed, project)
+                             pos, n_dirs, embed, project, args.row_normalization)
     if not args.out:
         cfg.layer, cfg.alpha, cfg.pos = layer, alpha, res["directions_at"][0][1]
         cfg.from_layer, cfg.n_dirs, cfg.embed_ablate, cfg.project_harmless = (
@@ -167,11 +172,14 @@ def cmd_eval(args: argparse.Namespace) -> None:
         dirs["abliterated"] = cfg.abliterated_dir
     if args.dirs:
         dirs = _parse_dirs(args.dirs)
-    from .evals import run_eval_suite
-    results = run_eval_suite(dirs, cfg)
-
+    # Never let the model under test grade itself; use a dedicated classifier.
+    judge = None if args.no_judge else (args.judge or cfg.judge_dir or None)
     out_dir = Path(cfg.eval_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    from .evals import run_eval_suite
+    results, _ = run_eval_suite(dirs, cfg, out_dir, judge,
+                                args.judge_kind or cfg.judge_kind)
+
     out = out_dir / "summary.json"
     out.write_text(json.dumps(results, indent=2))
 
@@ -179,7 +187,8 @@ def cmd_eval(args: argparse.Namespace) -> None:
     print(f"\n{'model':14s} " + " ".join(f"{k:>18s}" for k in keys))
     for label, row in results.items():
         print(f"{label:14s} " + " ".join(f"{row[k]:>18.4f}" for k in keys))
-    print(f"\nwrote {out}")
+    print(f"\nwrote {out} and {out_dir / 'completions.jsonl'}"
+          + ("" if judge else " (no judge: phrase match only)"))
 
 
 def _require_weights_dir(path: str, what: str) -> None:
@@ -317,12 +326,19 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("optimize", help="search direction + per-layer strengths (Heretic-style)")
     sp.add_argument("--trials", type=int, default=40)
     sp.add_argument("--n", type=int, default=16, help="prompts per set")
-    sp.add_argument("--max-tokens", type=int, default=24, help="tokens generated per refusal check")
+    sp.add_argument("--max-tokens", type=int, default=64, help="tokens generated per fast refusal check")
     sp.add_argument("--batch", type=int, default=16)
     sp.add_argument("--kl-soft", type=float, default=0.3, help="harmless KL before steep penalty")
     sp.add_argument("--study", default="abliterate", help="study name in optimize.db (new name = fresh search)")
     sp.add_argument("--warm", action="append", default=[], help="JSON params to try first (repeatable)")
     sp.add_argument("--budget-gb", type=float)
+    sp.add_argument("--rerank", type=int, default=5,
+                    help="top trials to rerank with the full-response judge (0 disables)")
+    sp.add_argument("--rerank-tokens", type=int, default=128,
+                    help="response length for semantic finalist reranking")
+    sp.add_argument("--judge", help="dedicated local classifier used for finalist reranking")
+    sp.add_argument("--judge-kind", choices=["qwen3guard", "wildguard", "rubric"],
+                    help="judge prompt/parser (default from config)")
     sp.add_argument("--out", help="adapter dir (default: abliterated_dir)")
     sp.set_defaults(fn=cmd_optimize)
 
@@ -336,6 +352,8 @@ def main(argv: list[str] | None = None) -> None:
                     help="also orthogonalize the token embedding (default on)")
     sp.add_argument("--project-harmless", action=argparse.BooleanOptionalAction,
                     default=None, help="drop each direction's harmless-mean component")
+    sp.add_argument("--row-normalization", choices=["none", "pre"], default="none",
+                    help="project in raw or row-normalized writer coordinates")
     sp.add_argument("--base", help="model dir to abliterate (default: model_dir), e.g. a requant")
     sp.add_argument("--out", help="output dir (default: abliterated_dir; config untouched if set)")
     sp.set_defaults(fn=cmd_abliterate)
@@ -343,9 +361,13 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("eval", help="refusal rate, over-refusal, perplexity per model dir")
     sp.add_argument("--n", type=int, help="prompts per eval set")
     sp.add_argument("--dirs", help="label=path[,label=path] overrides")
-    sp.add_argument("--max-tokens", type=int, help="tokens generated per prompt (refusals show early; 64 is plenty)")
+    sp.add_argument("--max-tokens", type=int, help="tokens generated per prompt (late refusals need room: 256+)")
     sp.add_argument("--batch", type=int, help="sequences per batched forward pass")
     sp.add_argument("--budget-gb", type=float, help="resident weight budget; larger models stream the rest")
+    sp.add_argument("--judge", help="dedicated local refusal-classifier model dir")
+    sp.add_argument("--judge-kind", choices=["qwen3guard", "wildguard", "rubric"],
+                    help="judge prompt/parser (default from config)")
+    sp.add_argument("--no-judge", action="store_true", help="score refusals by phrase match only")
     sp.set_defaults(fn=cmd_eval)
 
     sp = sub.add_parser("train", help="LoRA SFT via mlx_lm")

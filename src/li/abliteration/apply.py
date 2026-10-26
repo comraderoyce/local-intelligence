@@ -113,6 +113,15 @@ def _project_out(w: mx.array, dirs: mx.array, alpha: float) -> mx.array:
     return (w32 - alpha * dirs.T @ (dirs @ w32)).astype(orig_dtype)
 
 
+def _project_out_pre_normalized(w: mx.array, dirs: mx.array, alpha: float) -> mx.array:
+    """Project in row-normalized coordinates, then restore original scales."""
+    orig_dtype = w.dtype
+    w32 = w.astype(mx.float32)
+    norms = mx.maximum(mx.sqrt(mx.sum(w32 * w32, axis=1, keepdims=True)), 1e-12)
+    wn = w32 / norms
+    return ((wn - alpha * dirs.T @ (dirs @ wn)) * norms).astype(orig_dtype)
+
+
 def _project_out_rows(e: mx.array, dirs: mx.array, alpha: float) -> mx.array:
     """Embedding rows [vocab, D]: E' = E - alpha * (E D^T) D."""
     e32 = e.astype(mx.float32)
@@ -177,8 +186,16 @@ ADAPTER_KEYS = ("self_attn.o_proj", "linear_attn.out_proj", "mlp.down_proj",
                 "mlp.shared_expert.down_proj")
 
 
+def _directions_for(dirs: mx.array, layer: int | None) -> mx.array:
+    """Resolve shared [k,D] or layer-specific [L,k,D] directions."""
+    if dirs.ndim == 2:
+        return dirs
+    return dirs[0 if layer is None else layer]
+
+
 def _write_adapter(model_dir: str, dirs: mx.array, meta: dict, alpha_of: AlphaFn,
-                   out_dir: str, quant: dict) -> dict:
+                   out_dir: str, quant: dict,
+                   row_normalization: str = "none") -> dict:
     """Rank-k LoRA equal to W' = (I - a D^T D) W on every target, and to
     E' = E (I - a D^T D) on the embedding, a = alpha_of(layer, kind):
     lora_a = W^T D^T (or E D^T), lora_b = -a D, scale 1."""
@@ -196,22 +213,30 @@ def _write_adapter(model_dir: str, dirs: mx.array, meta: dict, alpha_of: AlphaFn
                 continue
             layer, kind = comp
             param = key[: -len(".weight")]
+            local_dirs = _directions_for(dirs, layer)
             if kind == "embed":
                 vocab = tensors[key].shape[0]
                 parts = []
                 for r in range(0, vocab, EMBED_CHUNK):
                     parts.append(_dequantized(tensors, key, quant, slice(r, r + EMBED_CHUNK))
-                                 @ dirs.T)
+                                 @ local_dirs.T)
                     mx.eval(parts[-1])
                 adapters[param + ".lora_a"] = mx.concatenate(parts)  # [vocab, k]
                 keys.append(param)  # top-level module path, matched model-wide
+                adapters[param + ".lora_b"] = -a * local_dirs
             else:
                 if ".experts." in key:
                     raise NotImplementedError("adapter abliteration of per-expert weights")
-                adapters[param + ".lora_a"] = (dirs @ _dequantized(tensors, key, quant)).T
+                w = _dequantized(tensors, key, quant)
+                if row_normalization == "pre":
+                    norms = mx.maximum(mx.sqrt(mx.sum(w * w, axis=1)), 1e-12)
+                    adapters[param + ".lora_a"] = (local_dirs @ (w / norms[:, None])).T
+                    adapters[param + ".lora_b"] = -a * local_dirs * norms[None, :]
+                else:
+                    adapters[param + ".lora_a"] = (local_dirs @ w).T
+                    adapters[param + ".lora_b"] = -a * local_dirs
                 lowest = min(lowest, layer)
-            adapters[param + ".lora_b"] = -a * dirs                  # [in|vocab, k], [k, out]
-            mx.eval(adapters[param + ".lora_a"])
+            mx.eval(adapters[param + ".lora_a"], adapters[param + ".lora_b"])
         del tensors
         mx.clear_cache()
     if dst.exists():
@@ -225,7 +250,7 @@ def _write_adapter(model_dir: str, dirs: mx.array, meta: dict, alpha_of: AlphaFn
         # LoRA-wraps the last num_layers layers; wrapped modules without saved
         # weights keep lora_b = 0 and are unchanged
         "num_layers": n_layers - lowest,
-        "lora_parameters": {"rank": int(dirs.shape[0]), "scale": 1.0, "dropout": 0.0,
+        "lora_parameters": {"rank": int(dirs.shape[-2]), "scale": 1.0, "dropout": 0.0,
                             "keys": keys},
         "base_model": model_dir,
         "abliteration": meta,
@@ -237,7 +262,8 @@ def _write_adapter(model_dir: str, dirs: mx.array, meta: dict, alpha_of: AlphaFn
 def apply_abliteration(model_dir: str, stats_path: str, layer: int,
                        alpha: float, out_dir: str, from_layer: int | None = None,
                        pos: int | None = None, n_dirs: int = 1, embed: bool = True,
-                       project_harmless: bool = False) -> dict:
+                       project_harmless: bool = False,
+                       row_normalization: str = "none") -> dict:
     # directions measured at (`layer`, `pos`) [+ next best], orthogonalized out
     # of every residual-output projection from `from_layer` upward and out of
     # the embedding (from_layer 0 + embed = canonical Arditi et al.)
@@ -245,13 +271,16 @@ def apply_abliteration(model_dir: str, stats_path: str, layer: int,
         from_layer = layer
     dirs_np, used = select_directions(stats_path, layer, pos, n_dirs, project_harmless)
     meta = {"layer": layer, "directions_at": used, "project_harmless": project_harmless,
-            "from_layer": from_layer, "alpha": alpha, "embed": embed}
+            "from_layer": from_layer, "alpha": alpha, "embed": embed,
+            "row_normalization": row_normalization}
     return write_abliteration(model_dir, dirs_np, out_dir,
-                              uniform_alpha(alpha, from_layer, embed), meta)
+                              uniform_alpha(alpha, from_layer, embed), meta,
+                              row_normalization=row_normalization)
 
 
 def write_abliteration(model_dir: str, dirs_np: np.ndarray, out_dir: str,
-                       alpha_of: AlphaFn, meta: dict) -> dict:
+                       alpha_of: AlphaFn, meta: dict,
+                       row_normalization: str = "none") -> dict:
     """Orthogonalize orthonormal `dirs_np` [k, D] out of every target with
     alpha_of(layer, kind) != 0: an adapter for quantized models, an edited
     copy otherwise."""
@@ -262,10 +291,13 @@ def write_abliteration(model_dir: str, dirs_np: np.ndarray, out_dir: str,
     dst_existed = dst.exists()
     dst.mkdir(parents=True, exist_ok=True)
 
+    if row_normalization not in ("none", "pre"):
+        raise ValueError("row_normalization must be 'none' or 'pre'")
     quant = _quant_params(model_dir)
     dirs = mx.array(dirs_np)
     if quant:
-        result = _write_adapter(model_dir, dirs, meta, alpha_of, out_dir, quant)
+        result = _write_adapter(model_dir, dirs, meta, alpha_of, out_dir, quant,
+                                row_normalization)
         (dst / "abliteration_complete").write_text(json.dumps(result) + "\n")
         return result
 
@@ -303,10 +335,16 @@ def write_abliteration(model_dir: str, dirs_np: np.ndarray, out_dir: str,
             for key in sorted(tensors):
                 if key in targets:
                     param = key[: -len(".weight")]
+                    comp = _component(key)
+                    local_dirs = _directions_for(dirs, comp[0])
                     if param + ".scales" in tensors:
-                        _modify_quantized(tensors, key, param, dirs, targets[key], quant)
+                        _modify_quantized(tensors, key, param, local_dirs, targets[key], quant)
                     else:
-                        _modify_raw(tensors, key, dirs, targets[key])
+                        if row_normalization == "pre" and not EMBED_RE.match(key):
+                            tensors[key] = _project_out_pre_normalized(
+                                tensors[key], local_dirs, targets[key])
+                        else:
+                            _modify_raw(tensors, key, local_dirs, targets[key])
                     modified += 1
             # pop as we go: an array still held by `tensors` stays resident
             # after its part is written

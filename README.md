@@ -7,16 +7,18 @@ Designed for 8GB and 16GB Macs, generalizes upward (32GB+).
 
 1. **download** — pulls a pre-quantized MLX model (4-bit for ≤14B, 3-bit for 30B+)
 2. **measure** — streams harmful (AdvBench) vs harmless (Alpaca) prompts through the
-   model one at a time, captures last-position residual activations at every layer,
-   computes per-layer diff-in-means refusal directions and a separation score
+   model one at a time, captures the chat-template suffix at every layer, and computes
+   per-layer/per-position diff-in-means refusal directions
 3. **abliterate** — orthogonalizes the chosen direction out of the weight matrices that
    write to the residual stream (`o_proj`, `down_proj`, per-expert for MoE) at the chosen
-   layer and above. Works **on the quantized weights**: dequantize tensor → edit →
-   requantize, so peak RAM is a few tensors, never a full-precision model
-4. **eval** — refusal rate (AdvBench), over-refusal rate (XSTest), perplexity
-   (wikitext-2) for base vs abliterated side by side
-5. **train** — LoRA SFT via `mlx_lm.lora` on your task data
-6. **fuse** — merges the adapter into the weights; serve with `mlx_lm.server` or `li chat`
+   layer and above. Quantized bases get an exact low-rank correction adapter, avoiding
+   the loss caused by requantizing a small weight edit
+4. **optimize** — searches the direction, harmless projection, global vs per-layer
+   scope, and attention/MLP depth schedules; finalists are reranked on longer responses
+5. **eval** — dedicated-judge refusal rate (AdvBench), over-refusal rate (XSTest),
+   phrase-match diagnostics, and perplexity (wikitext-2) side by side
+6. **train** — LoRA SFT via `mlx_lm.lora` on your task data
+7. **fuse** — merges the adapter into the weights; serve with `mlx_lm.server` or `li chat`
 
 Ordering matters: **abliterate → train**. Training after abliteration keeps the refusal
 removal; abliterating after training can erase learned behavior.
@@ -34,7 +36,8 @@ li download
 ```sh
 li measure                          # ranks layers, writes runs/<model>/report.json
 li abliterate                       # uses best layer; --layer N --alpha 0.8 to tune
-li eval                             # base vs abliterated table
+li optimize --trials 100            # searched adapter; resumable Optuna study
+li eval                             # base vs abliterated, with configured judge
 li chat                             # probe the abliterated model manually
 li train --data task.jsonl --iters 1000
 li fuse                             # merged model in runs/<model>/fused
@@ -46,6 +49,11 @@ li fuse                             # merged model in runs/<model>/fused
 `alpha` is the knob: 1.0 = full direction removal, lower = gentler. If eval shows high
 refusal still, raise alpha or pick a different layer; if perplexity jumps or the model
 gets incoherent, lower it.
+
+Measurement, selection, optimization, and final evaluation use fixed non-overlapping
+prompt slices. The cheap phrase heuristic is diagnostic only. For headline refusal
+numbers, configure a purpose-trained local judge such as Qwen3Guard-Gen and set
+`judge_dir`/`judge_kind` in `li.toml`; the model under test should not grade itself.
 
 Layer auto-selection ignores the top third of the network: the separation score peaks
 in early layers on small models, but abliterating there destroys the model (verified:
