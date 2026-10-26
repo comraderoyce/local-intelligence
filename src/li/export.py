@@ -19,6 +19,7 @@ quantizes the edited copy, so peak memory stays at a few GB on any size model.
 """
 from __future__ import annotations
 
+import gc
 import json
 import shutil
 from pathlib import Path
@@ -156,6 +157,26 @@ def write_edited(source_dir: str, edits: dict, out_dir: str) -> int:
     return len(done)
 
 
+def _convert(src: str, out: str, quantize: bool, bits: int, group_size: int) -> None:
+    """mlx_lm.convert, saving in ~1GB shards. Its default 5GB shard holds a
+    whole quantized 8B, and saving a shard evaluates every source tensor
+    feeding it at once: all 16GB of bf16 on a 16GB Mac. Small shards bound
+    the peak to the quantized weights saved so far plus about one shard."""
+    from mlx_lm import convert, utils
+    make_shards = utils.make_shards
+    utils.make_shards = lambda weights, max_file_size_gb=1: make_shards(weights, 1)
+    try:
+        convert(src, mlx_path=out, quantize=quantize,
+                q_bits=bits if quantize else None,
+                q_group_size=group_size if quantize else None, dtype="bfloat16")
+    finally:
+        utils.make_shards = make_shards
+        # convert's model is gone, but MLX keeps its buffers cached; a model
+        # loaded next (export verification) would otherwise sit on top of them
+        gc.collect()
+        mx.clear_cache()
+
+
 def export_model(adapter_dir: str, repo: str, source_dir: str, out_dir: str,
                  bits: int, group_size: int, keep_edited: bool = False) -> dict:
     out = Path(out_dir)
@@ -169,12 +190,13 @@ def export_model(adapter_dir: str, repo: str, source_dir: str, out_dir: str,
     print(f"applying {len(edits)} module edits to {source} -> {edited}")
     n = write_edited(str(source), edits, str(edited))
 
-    from mlx_lm import convert
     quantize = bits < 16
     print(f"converting -> {out} ({f'{bits}-bit, group {group_size}' if quantize else 'bf16'})")
-    convert(str(edited), mlx_path=str(out), quantize=quantize,
-            q_bits=bits if quantize else None,
-            q_group_size=group_size if quantize else None, dtype="bfloat16")
+    try:
+        _convert(str(edited), str(out), quantize, bits, group_size)
+    except BaseException:
+        shutil.rmtree(out, ignore_errors=True)   # an empty out dir blocks a rerun
+        raise
     if not keep_edited:
         shutil.rmtree(edited)
     info = {"source": repo, "adapter": adapter_dir, "edited_modules": n,
