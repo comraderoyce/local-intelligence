@@ -5,13 +5,13 @@ import json
 from pathlib import Path
 
 from .config import Config
-from .registry import resolve_spec
+from .registry import spec_for
 
 
 def download_draft(cfg: Config) -> None:
     """Pull the registry's speculative-decoding draft model, if it has one."""
-    spec = resolve_spec(cfg.name) if "/" not in cfg.name else None
-    if not spec or not spec.draft_repo or cfg.draft_dir:
+    spec = spec_for(cfg.name, cfg.repo)
+    if not spec.draft_repo or cfg.draft_dir:
         return
     from huggingface_hub import snapshot_download
     cfg.draft_dir = f"models/{spec.draft_repo.split('/')[-1].lower()}"
@@ -27,8 +27,8 @@ def download_model(cfg: Config) -> Path:
         return target
 
     from huggingface_hub import snapshot_download
-    spec = resolve_spec(cfg.name)
-    mlx_repo = cfg.__dict__.get("mlx_repo") or spec.mlx_repo
+    spec = spec_for(cfg.name, cfg.repo)
+    mlx_repo = spec.mlx_repo
     if mlx_repo:
         print(f"pulling pre-quantized {mlx_repo} -> {target}")
         snapshot_download(repo_id=mlx_repo, local_dir=target)

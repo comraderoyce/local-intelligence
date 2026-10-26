@@ -106,6 +106,12 @@ def resolve_spec(name_or_hf_id: str) -> ModelSpec:
     )
 
 
+def spec_for(name: str, repo: str) -> ModelSpec:
+    """Spec for a saved config: registry name, else the HF id it was created from
+    (`li init --model org/name` saves only the short name as `name`)."""
+    return resolve_spec(name if name in MODELS else repo)
+
+
 def fit_report(spec: ModelSpec, ram_gb: int) -> str:
     abl = "OK" if ram_gb >= spec.min_ram_gb else f"NO (needs >= {spec.min_ram_gb}GB)"
     train = "OK" if ram_gb >= spec.train_ram_gb else f"NO (needs >= {spec.train_ram_gb}GB)"

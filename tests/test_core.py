@@ -60,3 +60,14 @@ class DirectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RegistryTests(unittest.TestCase):
+    def test_custom_hf_id_resolves_after_init(self):
+        from li.registry import resolve_spec, spec_for
+        spec = resolve_spec("mistralai/Mistral-7B-Instruct-v0.3")
+        # init saves only the short name; download must still find the source repo
+        self.assertEqual(spec_for(spec.name, spec.repo).repo,
+                         "mistralai/Mistral-7B-Instruct-v0.3")
+        self.assertEqual(spec_for("qwen3-8b", "Qwen/Qwen3-8B").mlx_repo,
+                         "mlx-community/Qwen3-8B-4bit")
