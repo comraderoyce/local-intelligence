@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 from .config import CONFIG_PATH, Config, load_config, save_config
@@ -183,6 +184,8 @@ def cmd_eval(args: argparse.Namespace) -> None:
     dirs: dict[str, str] = {"base": cfg.model_dir}
     if Path(cfg.abliterated_dir).exists():
         dirs["abliterated"] = cfg.abliterated_dir
+    if cfg.fused_dir and Path(cfg.fused_dir).exists():
+        dirs["tuned"] = cfg.fused_dir   # did fine-tuning bring refusals back?
     if args.dirs:
         dirs = _parse_dirs(args.dirs)
     # Never let the model under test grade itself; use a dedicated classifier.
@@ -227,13 +230,28 @@ def cmd_train(args: argparse.Namespace) -> None:
     if not args.data:
         raise SystemExit("pass --data <jsonl|json|csv> with instruction/output pairs")
     from .train import prepare_sft_data, run_sft
-    data_dir = f"{cfg.run_dir}/sft_data"
-    counts = prepare_sft_data(args.data, data_dir)
-    print(f"prepared: {counts['train']} train / {counts['valid']} valid -> {data_dir}")
-
     base = cfg.model_dir
     if args.on == "abliterated":
         base = _abliterated_weights(cfg, "LoRA training")
+    elif args.on == "tuned":   # a second pass on top of an earlier fine-tune
+        if not Path(cfg.fused_dir).exists():
+            raise SystemExit(f"no fine-tuned model at {cfg.fused_dir} — `li train` and "
+                             "`li fuse` first")
+        base = cfg.fused_dir
+    cfg.train_max_seq = args.max_seq or cfg.train_max_seq
+    from mlx_lm.utils import load_tokenizer
+    data_dir = f"{cfg.run_dir}/sft_data"
+    counts = prepare_sft_data(args.data, data_dir, load_tokenizer(Path(base)),
+                              cfg.train_max_seq)
+    # question/answer data trains on the answers only; text has no prompt
+    mask = counts["kind"] == "chat" if args.mask_prompt is None else args.mask_prompt
+    if mask and counts["kind"] == "text":
+        raise SystemExit("--mask-prompt needs question/answer data, not text")
+    what = ("text chunks" if counts["kind"] == "text" else
+            "question/answer rows" + (", loss on answers only" if mask else ""))
+    print(f"prepared: {counts['train']} train / {counts['valid']} valid {what} "
+          f"(<= {cfg.train_max_seq} tokens) -> {data_dir}")
+
     ram = machine_ram_gb()
     if ram < 16:
         print(f"note: {ram}GB — keep iters/batch small; watch for memory pressure")
@@ -246,8 +264,10 @@ def cmd_train(args: argparse.Namespace) -> None:
     save_config(cfg)
 
     run_sft(base, data_dir, cfg, cfg.lora_iters, cfg.lora_lr,
-            cfg.lora_batch_size, cfg.lora_layers, cfg.adapter_dir)
-    print(f"\nadapter: {cfg.adapter_dir} — next: `li fuse`")
+            cfg.lora_batch_size, cfg.lora_layers, cfg.adapter_dir,
+            cfg.train_max_seq, mask)
+    print(f"\nadapter: {cfg.adapter_dir} — next: `li fuse`, then `li eval` to check "
+          "the refusal removal survived training")
 
 
 def cmd_fuse(args: argparse.Namespace) -> None:
@@ -259,8 +279,26 @@ def cmd_fuse(args: argparse.Namespace) -> None:
     trained_on = json.loads((Path(adapter) / "adapter_config.json").read_text()).get("model")
     base = trained_on or _abliterated_weights(cfg, "fusing")
     out = args.out or cfg.fused_dir
+    from .stream import files_fingerprint
     from .train import fuse_adapter
-    fuse_adapter(base, adapter, out)
+    marker = Path(out) / "li_fused.json"
+    adapter_fp = files_fingerprint(str(Path(adapter) / "adapters.safetensors"))
+    if (Path(base).resolve() == Path(out).resolve() and marker.exists()
+            and json.loads(marker.read_text()).get("adapter") == adapter_fp):
+        raise SystemExit(f"{adapter} is already fused into {out}; fusing again would "
+                         "apply it twice")
+    # fuse beside out and swap in: a second pass reads its base from out
+    staged = f"{out}.partial"
+    shutil.rmtree(staged, ignore_errors=True)
+    fuse_adapter(base, adapter, staged)
+    (Path(staged) / "li_fused.json").write_text(json.dumps(
+        {"base": base, "adapter_dir": adapter, "adapter": adapter_fp}, indent=2) + "\n")
+    old = Path(f"{out}.old")
+    shutil.rmtree(old, ignore_errors=True)
+    if Path(out).exists():
+        Path(out).rename(old)
+    Path(staged).rename(out)
+    shutil.rmtree(old, ignore_errors=True)
     print(f"fused model: {out} — try it with `li chat --dir {out}`, serve it with "
           f"`li serve --dir {out}`")
 
@@ -290,25 +328,30 @@ def cmd_export(args: argparse.Namespace) -> None:
     print(f"next: `li serve` (OpenAI-compatible server), `li train --on abliterated`")
 
 
+def _latest_model(cfg: Config) -> tuple[str, str]:
+    """(dir, model-id suffix) of the most finished model: fine-tuned, else
+    exported, else the abliteration adapter, else the base."""
+    for path, suffix in ((cfg.fused_dir, "-tuned"), (cfg.export_path, "-abliterated"),
+                         (cfg.abliterated_dir, "-abliterated")):
+        if path and Path(path).exists():
+            return path, suffix
+    return cfg.model_dir, ""
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     cfg = load_config()
     from .registry import check_inference_fits, weights_gb
     from .stream import resolve_model_dir
     if args.dir:
-        target = args.dir
+        target, suffix = args.dir, "-abliterated"
     elif args.base:
-        target = cfg.model_dir
-    elif Path(cfg.export_path).exists():
-        target = cfg.export_path
-    elif Path(cfg.abliterated_dir).exists():
-        target = cfg.abliterated_dir
+        target, suffix = cfg.model_dir, ""
     else:
-        target = cfg.model_dir
+        target, suffix = _latest_model(cfg)
     model_dir, adapter = resolve_model_dir(target)
     # mlx_lm.server loads the whole model; streaming is `li chat` only
     check_inference_fits(model_dir, force=args.force)
-    abliterated = target != cfg.model_dir
-    name = args.name or f"{cfg.name}{'-abliterated' if abliterated else ''}"
+    name = args.name or f"{cfg.name}{suffix}"
     from .serve import run_server
     run_server(model_dir, adapter, name, args.host, args.port, args.max_tokens,
                args.think, weights_gb(model_dir),
@@ -325,9 +368,8 @@ def _parse_dirs(spec: str) -> dict[str, str]:
 
 def cmd_chat(args: argparse.Namespace) -> None:
     cfg = load_config()
-    model = args.dir or cfg.abliterated_dir
-    if not Path(model).exists():
-        model = cfg.model_dir
+    model = args.dir or _latest_model(cfg)[0]
+    print(f"model: {model}")
     draft = "" if args.no_draft else (args.draft or cfg.draft_dir)
     budget = args.budget_gb if args.budget_gb is not None else (cfg.stream_budget_gb or None)
     from .chat import run_chat
@@ -444,8 +486,14 @@ def main(argv: list[str] | None = None) -> None:
     sp.set_defaults(fn=cmd_eval)
 
     sp = sub.add_parser("train", help="LoRA SFT via mlx_lm")
-    sp.add_argument("--data", help="jsonl/json/csv with instruction/output (or messages)")
-    sp.add_argument("--on", choices=["base", "abliterated"], default="abliterated")
+    sp.add_argument("--data", help="question/answer .jsonl/.json/.csv, or text: .txt/.md, "
+                    "a directory of them, or {\"text\": ...} rows")
+    sp.add_argument("--on", choices=["base", "abliterated", "tuned"], default="abliterated",
+                    help="model to train (tuned: the last `li fuse`, for a second pass)")
+    sp.add_argument("--max-seq", type=int,
+                    help="tokens per example; text is chunked to this (default 512)")
+    sp.add_argument("--mask-prompt", action=argparse.BooleanOptionalAction, default=None,
+                    help="loss on answers only (default: on for question/answer data)")
     sp.add_argument("--iters", type=int)
     sp.add_argument("--lr", type=float)
     sp.add_argument("--batch-size", type=int)
@@ -468,7 +516,8 @@ def main(argv: list[str] | None = None) -> None:
     sp.set_defaults(fn=cmd_export)
 
     sp = sub.add_parser("serve", help="OpenAI-compatible server (for agents, chat UIs)")
-    sp.add_argument("--dir", help="model or adapter dir (default: export, else adapter, else base)")
+    sp.add_argument("--dir", help="model or adapter dir (default: fused fine-tune, else "
+                    "export, else adapter, else base)")
     sp.add_argument("--base", action="store_true", help="serve the unmodified base model")
     sp.add_argument("--name", help="model id clients see (default: <model>-abliterated)")
     sp.add_argument("--host", default="127.0.0.1")

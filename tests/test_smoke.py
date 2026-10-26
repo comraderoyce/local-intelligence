@@ -60,6 +60,7 @@ class SmokeTest(unittest.TestCase):
         li(cwd, "select", "--n", "8", "--per-pos", "1")
         li(cwd, "abliterate")
         run = cwd / "runs" / "qwen3-0.6b-4bit"
+        shutil.rmtree(run / "fused", ignore_errors=True)   # reused LI_SMOKE_WORKDIR
         self.assertTrue((run / "abliterated" / "adapters.safetensors").exists())
 
         li(cwd, "eval", "--n", "8", "--max-tokens", "48")
@@ -108,6 +109,20 @@ class SmokeTest(unittest.TestCase):
         finally:
             server.terminate()
             server.wait(timeout=30)
+
+        # fine-tune the export on both data kinds, then a second pass on top
+        repo = Path(__file__).resolve().parent.parent
+        docs = cwd / "docs"
+        docs.mkdir(exist_ok=True)
+        shutil.copy(repo / "README.md", docs / "README.md")
+        out = li(cwd, "train", "--data", str(docs), "--iters", "5", "--layers", "4")
+        self.assertIn("text chunks", out)
+        li(cwd, "fuse")
+        out = li(cwd, "train", "--on", "tuned", "--data",
+                 str(repo / "examples" / "sample_task.jsonl"), "--iters", "5", "--layers", "4")
+        self.assertIn("loss on answers only", out)
+        li(cwd, "fuse")
+        self.assertTrue((run / "fused" / "li_fused.json").exists())
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@ class Config:
     lora_lr: float = 1e-4
     lora_batch_size: int = 1
     lora_layers: int = 16
+    train_max_seq: int = 512     # tokens per training example; text is chunked to this
     fused_dir: str = ""
     export_dir: str = ""
 

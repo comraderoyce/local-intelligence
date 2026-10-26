@@ -70,7 +70,7 @@ stop and resume between steps.
 `li serve` starts an OpenAI-compatible server for one model:
 
 ```sh
-li serve                      # export if present, else base + adapter
+li serve                      # fine-tune, else export, else base + adapter
 li serve --no-think --port 9000 -- --temp 0.7   # flags after -- go to mlx_lm.server
 ```
 
@@ -111,8 +111,8 @@ models whose weights exceed 60% of RAM (see [Memory safety](#memory-safety)); us
 | `li eval` | refusal rate, over-refusal rate, perplexity; every response saved |
 | `li chat` | terminal chat; streams layers from disk for models larger than RAM allows |
 | `li export` | adapter → standalone quantized model folder |
-| `li serve` | OpenAI-compatible server |
-| `li train` / `li fuse` | LoRA fine-tune on your data, then merge |
+| `li serve` | OpenAI-compatible server (the fine-tuned model if there is one) |
+| `li train` / `li fuse` | LoRA fine-tune on question/answer data or plain text, then merge |
 | `li bench` | tokens/s, perplexity and memory per model |
 | `li requant` | drop middle-layer MLPs to fewer bits to fit more in RAM |
 
@@ -201,19 +201,39 @@ this in three ways:
 Close memory-heavy apps during long runs, keep the Mac on power, and don't raise
 `iogpu.wired_limit_mb`.
 
-## Fine-tuning
+## Fine-tuning on your own data (experimental)
 
 Abliterate first, then train: training afterwards keeps the refusal removal, while
 abliterating a fine-tuned model can erase what it learned.
 
 ```sh
 li export                                  # training needs standalone weights
-li train --data task.jsonl --iters 1000    # LoRA on the exported model
+li train --data qa.jsonl --iters 1000      # LoRA on the exported model
 li fuse                                    # merged model in runs/<model>/fused
+li eval                                    # base vs abliterated vs tuned
 ```
 
-`examples/sample_task.jsonl` shows the data format; `prompt`/`completion` and chat
-`messages` rows are also accepted.
+`--data` takes either kind of data, one kind per run:
+
+| kind | accepted | trained on |
+|---|---|---|
+| question/answer | `.jsonl`, `.json` or `.csv` rows of `instruction` + `output`/`response`/`answer`, `prompt` + `completion`, or chat `messages` (system/user/assistant) | the answers only (`--no-mask-prompt` to include the questions) |
+| unstructured text | a `.txt` or `.md` file, a directory of them (searched recursively), or `.jsonl` rows with a `text` field | all of it, split at paragraph breaks into chunks of up to `--max-seq` tokens (default 512) |
+
+To teach a domain from documents and keep the model answering questions, train in
+two passes: the text first, then the question/answer data on top of it.
+
+```sh
+li train --data docs/ && li fuse
+li train --on tuned --data qa.jsonl && li fuse
+```
+
+`examples/sample_task.jsonl` shows the question/answer format.
+
+After `li fuse`, `li chat`, `li serve` and `li eval` use the fused model by default.
+`li eval` adds it as a `tuned` row: domain data that contains refusals can bring
+them back, so check before you use it. Delete `runs/<model>/fused` to go back to
+the exported model. LoRA on Qwen3-8B needs 16GB; on 8GB use Qwen3-4B or smaller.
 
 ## Limitations
 

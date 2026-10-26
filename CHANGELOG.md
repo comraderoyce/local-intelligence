@@ -32,3 +32,8 @@ First public alpha.
 - Adapters are written beside the target and swapped in, so an interrupted write keeps
   the previous one. An offline `download` accepts a local copy only if its weights
   are complete.
+- `train` (experimental): unstructured text (`.txt`/`.md` files, directories of them,
+  or `{"text": ...}` rows), chunked to `--max-seq` tokens; question/answer data trains
+  on the answers only by default (`--mask-prompt`); `--on tuned` trains a second pass
+  on the last fused model. After `fuse`, `chat`, `serve` and
+  `eval` use the fused model by default, and `eval` reports it as `tuned`.

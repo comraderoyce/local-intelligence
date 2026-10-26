@@ -214,3 +214,48 @@ class DownloadTests(unittest.TestCase):
                 {"weight_map": {"a": "model-1.safetensors", "b": "model-2.safetensors"}}))
             (t / "model-1.safetensors").write_bytes(b"")
             self.assertEqual(missing_weights(t), ["model-2.safetensors"])
+
+
+class WordTokenizer:
+    """One token per whitespace-separated word."""
+    def encode(self, text):
+        return text.split()
+
+    def decode(self, ids):
+        return " ".join(ids)
+
+
+class TrainDataTests(unittest.TestCase):
+    def test_text_is_chunked_on_paragraphs_within_the_limit(self):
+        from li.train.sft import chunk_text
+        doc = "\n\n".join([" ".join(["w"] * 30)] * 5 + [" ".join(["long"] * 250)])
+        chunks = chunk_text(doc, WordTokenizer(), 100)
+        self.assertTrue(all(len(c.split()) <= 100 for c in chunks))
+        self.assertEqual(sum(len(c.split()) for c in chunks), 400)   # nothing lost
+        self.assertIn("\n\n", chunks[0])                            # paragraphs packed
+
+    def test_text_sources_and_format_detection(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from li.train.sft import prepare_sft_data
+        with tempfile.TemporaryDirectory() as d:
+            docs = Path(d) / "docs"
+            (docs / "sub").mkdir(parents=True)
+            for i in range(4):
+                (docs / "sub" / f"{i}.md").write_text("\n\n".join(["para " * 20] * 6))
+            counts = prepare_sft_data(str(docs), f"{d}/out", WordTokenizer(), 50)
+            self.assertEqual(counts["kind"], "text")
+            rows = [json.loads(x) for x in open(f"{d}/out/train.jsonl")]
+            self.assertTrue(all(set(r) == {"text"} for r in rows))
+
+            qa = Path(d) / "qa.jsonl"
+            qa.write_text("".join(json.dumps({"prompt": f"q{i}", "completion": f"a{i}"}) + "\n"
+                                  for i in range(10)))
+            self.assertEqual(prepare_sft_data(str(qa), f"{d}/qa")["kind"], "chat")
+
+            mixed = Path(d) / "mixed.jsonl"
+            mixed.write_text(qa.read_text() + json.dumps({"text": "raw"}) + "\n")
+            with self.assertRaises(SystemExit):
+                prepare_sft_data(str(mixed), f"{d}/mixed", WordTokenizer())
