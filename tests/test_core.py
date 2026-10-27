@@ -196,6 +196,10 @@ class StudySetupTests(unittest.TestCase):
         check_study_setup(study, dict(setup))
         with self.assertRaises(SystemExit):
             check_study_setup(study, {**setup, "n_prompts": 32})
+        legacy = optuna.create_study(study_name="old")
+        legacy.optimize(lambda t: t.suggest_float("x", 0, 1), n_trials=1)
+        with self.assertRaises(SystemExit):
+            check_study_setup(legacy, setup)
 
 
 class DownloadTests(unittest.TestCase):
@@ -259,3 +263,52 @@ class TrainDataTests(unittest.TestCase):
             mixed.write_text(qa.read_text() + json.dumps({"text": "raw"}) + "\n")
             with self.assertRaises(SystemExit):
                 prepare_sft_data(str(mixed), f"{d}/mixed", WordTokenizer())
+
+    def test_chat_rows_are_validated_and_expanded_per_answer(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from li.train.sft import _normalize_row, prepare_sft_data
+        with self.assertRaises(SystemExit):   # would train on the user's text
+            _normalize_row({"messages": [{"role": "user", "content": "q"}]}, "r")
+        row = _normalize_row({"instruction": "Summarize", "input": "the text",
+                              "output": "short"}, "r")
+        self.assertEqual(row["messages"][0]["content"], "Summarize\n\nthe text")
+
+        turns = [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"},
+                 {"role": "user", "content": "q2"}, {"role": "assistant", "content": "a2"}]
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "chats.jsonl"
+            src.write_text("".join(json.dumps({"messages": turns}) + "\n" for _ in range(4)))
+            counts = prepare_sft_data(str(src), f"{d}/a")
+            self.assertEqual(counts["train"] + counts["valid"], 8)   # 2 answers x 4 chats
+            self.assertEqual(prepare_sft_data(str(src), f"{d}/b", mask_prompt=False)["train"], 3)
+            empty = Path(d) / "empty.jsonl"
+            empty.write_text("\n")
+            with self.assertRaises(SystemExit):
+                prepare_sft_data(str(empty), f"{d}/c")
+
+
+class InitTests(unittest.TestCase):
+    def test_init_keeps_an_existing_config_unless_overwritten(self):
+        import os
+        import tempfile
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from pathlib import Path
+
+        from li.cli import main
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                with redirect_stdout(StringIO()):
+                    main(["init", "--model", "qwen3-0.6b", "--force"])
+                    with self.assertRaises(SystemExit):
+                        main(["init", "--model", "qwen3-4b", "--force"])
+                    main(["init", "--model", "qwen3-4b", "--force", "--overwrite"])
+                self.assertIn("qwen3-4b", Path("li.toml").read_text())
+                self.assertIn("qwen3-0.6b", Path("li.toml.bak").read_text())
+            finally:
+                os.chdir(cwd)

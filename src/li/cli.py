@@ -12,6 +12,10 @@ from .registry import (JUDGE_DIR, JUDGE_KIND, MODELS, fit_report, machine_ram_gb
 
 
 def cmd_init(args: argparse.Namespace) -> None:
+    if CONFIG_PATH.exists() and not args.overwrite:
+        raise SystemExit(f"{CONFIG_PATH} already exists here (it records this workspace's "
+                         "chosen layer, adapters and runs); --overwrite to replace it, "
+                         "or run `li init` in a new directory")
     ram = machine_ram_gb()
     if args.model:
         spec = resolve_spec(args.model)
@@ -57,6 +61,10 @@ def cmd_init(args: argparse.Namespace) -> None:
         print("  note: train/fuse will be refused locally; the abliterated model still "
               "serves fine and can be trained on a bigger machine pointing at the same dirs")
 
+    if CONFIG_PATH.exists():
+        backup = CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak")
+        CONFIG_PATH.replace(backup)
+        print(f"previous config saved as {backup}")
     save_config(cfg)
     print(f"\nwrote {CONFIG_PATH} — next: `li download`")
 
@@ -241,14 +249,16 @@ def cmd_train(args: argparse.Namespace) -> None:
     cfg.train_max_seq = args.max_seq or cfg.train_max_seq
     from mlx_lm.utils import load_tokenizer
     data_dir = f"{cfg.run_dir}/sft_data"
+    # question/answer data trains on the answers only by default; text has no prompt
+    mask = args.mask_prompt is not False
     counts = prepare_sft_data(args.data, data_dir, load_tokenizer(Path(base)),
-                              cfg.train_max_seq)
-    # question/answer data trains on the answers only; text has no prompt
-    mask = counts["kind"] == "chat" if args.mask_prompt is None else args.mask_prompt
-    if mask and counts["kind"] == "text":
-        raise SystemExit("--mask-prompt needs question/answer data, not text")
+                              cfg.train_max_seq, mask)
+    if counts["kind"] == "text":
+        if args.mask_prompt:
+            raise SystemExit("--mask-prompt needs question/answer data, not text")
+        mask = False
     what = ("text chunks" if counts["kind"] == "text" else
-            "question/answer rows" + (", loss on answers only" if mask else ""))
+            "question/answer examples" + (", loss on answers only" if mask else ""))
     print(f"prepared: {counts['train']} train / {counts['valid']} valid {what} "
           f"(<= {cfg.train_max_seq} tokens) -> {data_dir}")
 
@@ -421,6 +431,8 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--model", help="registry name or HF org/name")
     sp.add_argument("--bits", type=int, help="override quantization bits")
     sp.add_argument("--force", action="store_true", help="write config even if RAM floor is missed")
+    sp.add_argument("--overwrite", action="store_true",
+                    help="replace an existing li.toml (kept as li.toml.bak)")
     sp.set_defaults(fn=cmd_init)
 
     sp = sub.add_parser("download", help="fetch pre-quantized MLX model or convert from fp16")

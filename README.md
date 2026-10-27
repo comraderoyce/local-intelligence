@@ -179,7 +179,8 @@ Qwen3-8B 4-bit, `li optimize` defaults, 100 AdvBench + 100 XSTest eval prompts,
 | Qwen3.8-27B (hybrid) | 3-bit | 16GB | 16GB streamed (<1 tok/s), 24GB resident | 64GB+ |
 | Qwen3-32B | 3-bit | 16GB | 24GB | 64GB+ |
 
-`li init` refuses (or with `--force`, warns about) tiers this machine can't run. Other
+`li init` refuses (or with `--force`, warns about) tiers this machine can't run, and
+won't replace an existing `li.toml` without `--overwrite`. Other
 Hugging Face models work with `li init --model org/name`; they're converted from the
 original weights locally and are less tested than the registry.
 
@@ -217,7 +218,7 @@ li eval                                    # base vs abliterated vs tuned
 
 | kind | accepted | trained on |
 |---|---|---|
-| question/answer | `.jsonl`, `.json` or `.csv` rows of `instruction` + `output`/`response`/`answer`, `prompt` + `completion`, or chat `messages` (system/user/assistant) | the answers only (`--no-mask-prompt` to include the questions) |
+| question/answer | `.jsonl`, `.json` or `.csv` rows of `instruction` (+ optional `input`) + `output`/`response`/`answer`, `prompt` + `completion`, or chat `messages` (system/user/assistant, ending with the assistant) | every assistant answer, one example per answer in multi-turn chats (`--no-mask-prompt` trains on whole conversations instead) |
 | unstructured text | a `.txt` or `.md` file, a directory of them (searched recursively), or `.jsonl` rows with a `text` field | all of it, split at paragraph breaks into chunks of up to `--max-seq` tokens (default 512) |
 
 To teach a domain from documents and keep the model answering questions, train in

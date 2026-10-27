@@ -171,8 +171,9 @@ def check_study_setup(study, setup: dict) -> None:
     if not study.trials:
         study.set_user_attr("setup", setup)
     elif saved is None:
-        print(f"  warning: study '{study.study_name}' predates setup checks; "
-              "resuming unverified", flush=True)
+        raise SystemExit(f"study '{study.study_name}' predates setup checks, so its trials "
+                         "can't be verified as comparable. Rerun with --study <new name> "
+                         "for a fresh search")
     elif saved != setup:
         changed = ", ".join(k for k in setup if saved.get(k) != setup[k])
         raise SystemExit(f"study '{study.study_name}' was run with a different {changed}; "

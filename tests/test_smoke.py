@@ -54,7 +54,7 @@ class SmokeTest(unittest.TestCase):
                 tmp.cleanup()
 
     def _run(self, cwd: Path) -> None:
-        li(cwd, "init", "--model", "qwen3-0.6b")
+        li(cwd, "init", "--model", "qwen3-0.6b", "--overwrite")
         li(cwd, "download")
         li(cwd, "measure", "--n-harmful", "16", "--n-harmless", "16")
         li(cwd, "select", "--n", "8", "--per-pos", "1")

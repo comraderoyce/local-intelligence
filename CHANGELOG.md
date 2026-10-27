@@ -37,3 +37,8 @@ First public alpha.
   on the answers only by default (`--mask-prompt`); `--on tuned` trains a second pass
   on the last fused model. After `fuse`, `chat`, `serve` and
   `eval` use the fused model by default, and `eval` reports it as `tuned`.
+- `train` validates chat rows (they must end with an assistant answer), adds Alpaca's
+  `input` field to the instruction, trains each answer of a multi-turn chat, and writes
+  the adapter beside the target so a failed run keeps the previous one.
+- `init` won't replace an existing `li.toml` without `--overwrite` (the old one is kept
+  as `li.toml.bak`). `optimize` refuses to resume studies saved before setup checks.

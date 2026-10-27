@@ -19,6 +19,7 @@ import csv
 import json
 import random
 import re
+import shutil
 import subprocess
 import sys
 from collections import deque
@@ -50,12 +51,19 @@ def _normalize_row(row: dict, where: str) -> dict:
             and isinstance(m.get("content"), str)
             for m in msgs
         ):
+            if msgs[-1]["role"] != "assistant":
+                raise SystemExit(f"{where}: the last message must be the assistant's "
+                                 f"answer (got {msgs[-1]['role']!r})")
             return {"messages": [{"role": m["role"], "content": m["content"]} for m in msgs]}
 
     if isinstance(row.get("instruction"), str) and not isinstance(row.get("prompt"), str):
         assistant = next((row[k] for k in _COMPLETION_KEYS if isinstance(row.get(k), str)), None)
         if assistant is not None:
-            return _chat_row(row["instruction"], assistant)
+            # Alpaca rows carry the material to work on in `input`
+            extra = row.get("input")
+            user = (f"{row['instruction']}\n\n{extra}" if isinstance(extra, str) and extra.strip()
+                    else row["instruction"])
+            return _chat_row(user, assistant)
 
     if isinstance(row.get("prompt"), str) and isinstance(row.get("completion"), str):
         return _chat_row(row["prompt"], row["completion"])
@@ -132,11 +140,21 @@ def chunk_text(text: str, tokenizer, max_tokens: int) -> list[str]:
     return chunks
 
 
+def _per_turn(row: dict) -> list[dict]:
+    """One example per assistant turn: mlx_lm's --mask-prompt trains only on
+    a conversation's final message, so earlier answers need rows of their own."""
+    msgs = row["messages"]
+    return [{"messages": msgs[:i + 1]} for i, m in enumerate(msgs) if m["role"] == "assistant"]
+
+
 def prepare_sft_data(src: str, out_dir: str, tokenizer=None,
-                     max_seq: int = 512) -> dict:
+                     max_seq: int = 512, mask_prompt: bool = True) -> dict:
     """Normalize src to chat or text jsonl, shuffle (seed 0), split 95/5.
-    Text needs the model's `tokenizer` to chunk documents to max_seq tokens."""
+    Text needs the model's `tokenizer` to chunk documents to max_seq tokens.
+    With mask_prompt, multi-turn chats become one example per answer."""
     rows = _read_rows(src)
+    if not rows:
+        raise SystemExit(f"{src}: no usable rows")
     kinds = {"text" if "text" in r else "chat" for r in rows}
     if len(kinds) > 1:
         raise SystemExit(f"{src} mixes question/answer rows and text rows; mlx_lm trains "
@@ -151,15 +169,15 @@ def prepare_sft_data(src: str, out_dir: str, tokenizer=None,
         raise SystemExit(f"{src}: need at least 2 examples (got {len(rows)})")
     random.Random(0).shuffle(rows)
     n_valid = max(1, int(len(rows) * 0.05))
+    # split before expanding turns, so one conversation can't be in both sets
+    valid, train = rows[:n_valid], rows[n_valid:]
+    if kind == "chat" and mask_prompt:
+        valid, train = ([x for r in part for x in _per_turn(r)] for part in (valid, train))
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "train.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in rows[n_valid:])
-    )
-    (out / "valid.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in rows[:n_valid])
-    )
-    return {"train": len(rows) - n_valid, "valid": n_valid, "kind": kind}
+    (out / "train.jsonl").write_text("".join(json.dumps(r) + "\n" for r in train))
+    (out / "valid.jsonl").write_text("".join(json.dumps(r) + "\n" for r in valid))
+    return {"train": len(train), "valid": len(valid), "kind": kind}
 
 
 def _run_streamed(cmd: list[str], what: str) -> None:
@@ -182,8 +200,15 @@ def run_sft(model_dir: str, data_dir: str, cfg: Config, iters: int, lr: float,
             batch_size: int, num_layers: int, adapter_dir: str,
             max_seq: int = 512, mask_prompt: bool = False) -> None:
     """LoRA fine-tune model_dir on data_dir via `mlx_lm lora`. mask_prompt
-    trains on assistant turns only (chat data; mlx_lm rejects it for text)."""
-    Path(adapter_dir).mkdir(parents=True, exist_ok=True)
+    trains on assistant turns only (chat data; mlx_lm rejects it for text).
+
+    mlx_lm writes adapter_config.json before training starts, so training
+    goes to a sibling dir that replaces adapter_dir only once it holds both
+    files: a failed run can't pair a new config with old weights."""
+    final, staged = Path(adapter_dir), Path(f"{adapter_dir}.partial")
+    shutil.rmtree(staged, ignore_errors=True)
+    staged.mkdir(parents=True)
+    adapter_dir = str(staged)
     _run_streamed(
         [
             sys.executable, "-m", "mlx_lm", "lora",
@@ -202,6 +227,21 @@ def run_sft(model_dir: str, data_dir: str, cfg: Config, iters: int, lr: float,
         ],
         "lora training",
     )
+    missing = [f for f in ("adapters.safetensors", "adapter_config.json")
+               if not (staged / f).exists()]
+    if missing:
+        raise RuntimeError(f"lora training left no {', '.join(missing)} in {staged}")
+    old = Path(f"{final}.old")
+    shutil.rmtree(old, ignore_errors=True)
+    if final.exists():
+        final.rename(old)
+    staged.rename(final)
+    shutil.rmtree(old, ignore_errors=True)
+    # mlx_lm records --adapter-path in the config; point it at the final dir
+    cfg_path = final / "adapter_config.json"
+    saved = json.loads(cfg_path.read_text())
+    saved["adapter_path"] = str(final)
+    cfg_path.write_text(json.dumps(saved, indent=4) + "\n")
 
 
 def fuse_adapter(model_dir: str, adapter_dir: str, out_dir: str) -> None:
