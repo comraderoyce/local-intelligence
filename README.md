@@ -55,7 +55,7 @@ li init --model qwen3-8b     # checks RAM, writes li.toml
 li download                  # 4-bit model + the refusal judge (~5.5GB)
 li measure                   # refusal direction at every layer and position
 li select                    # rank candidate directions by actually ablating them
-li optimize                  # search where and how strongly to edit (30–60 min)
+li abliterate                # remove the chosen direction (writes an adapter)
 li eval                      # base vs abliterated: refusals, over-refusals, perplexity
 li chat                      # talk to it in the terminal
 li export                    # standalone model folder (downloads bf16 weights once)
@@ -64,6 +64,11 @@ li serve                     # OpenAI-compatible server on 127.0.0.1:8080
 
 Each step writes its results under `runs/<model>/` and updates `li.toml`, so you can
 stop and resume between steps.
+
+If `li eval` shows refusals left or a perplexity rise you don't accept, run
+`li optimize` in place of `li abliterate`: a 30–60 minute search over where and how
+strongly to edit (see [How it works](#how-it-works)). On Qwen3-8B it didn't improve
+on `li select`'s choice.
 
 ## Use it from agents and chat apps
 
