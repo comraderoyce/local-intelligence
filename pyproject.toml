@@ -28,9 +28,8 @@ dependencies = [
 ]
 
 [project.urls]
-# TODO(release): replace OWNER with the GitHub account or org
-Repository = "https://github.com/OWNER/local-intelligence"
-Issues = "https://github.com/OWNER/local-intelligence/issues"
+Repository = "https://github.com/comraderoyce/local-intelligence"
+Issues = "https://github.com/comraderoyce/local-intelligence/issues"
 
 [project.scripts]
 li = "li.cli:main"

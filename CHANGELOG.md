@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0a1 — unreleased
+## 0.1.0a1 — 2026-10-27
 
 First public alpha.
 

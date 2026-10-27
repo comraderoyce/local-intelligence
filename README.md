@@ -37,8 +37,7 @@ knowledge or capability the base model lacks, but it removes a safeguard.
 ## Install
 
 ```sh
-# TODO(release): replace OWNER
-uv tool install git+https://github.com/OWNER/local-intelligence
+uv tool install git+https://github.com/comraderoyce/local-intelligence
 li --help
 ```
 
@@ -161,16 +160,6 @@ start helping and back out, or deflect without a stock refusal phrase.
 Every response is in `evals/<model>/completions.jsonl` with the judge's raw output.
 Read some before trusting a number. A rerun reuses saved responses only while the
 model's files and generation settings are unchanged.
-
-## Results
-
-Qwen3-8B 4-bit, `li optimize` defaults, 100 AdvBench + 100 XSTest eval prompts,
-384-token answers, judged by Qwen3Guard-Gen-0.6B:
-
-| model | AdvBench refusal | XSTest over-refusal | perplexity |
-|---|---|---|---|
-| base | _pending_ | _pending_ | _pending_ |
-| abliterated | _pending_ | _pending_ | _pending_ |
 
 ## Which model on which machine
 
